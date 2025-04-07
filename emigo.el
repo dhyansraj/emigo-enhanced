@@ -336,11 +336,6 @@ Then Emigo will start by gdb, please send new issue with `emigo-name' buffer con
 (defun emigo-enable ()
   (add-hook 'post-command-hook #'emigo-start-process))
 
-(defun emigo-read-file-content (filepath)
-  (with-temp-buffer
-    (insert-file-contents filepath)
-    (string-trim (buffer-string))))
-
 (defun emigo-update-header-line (session-path)
   (setq header-line-format (concat
                             (propertize (format " Project [%s]" (emigo-format-session-path session-path)) 'face font-lock-constant-face)
