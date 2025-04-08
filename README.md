@@ -37,7 +37,8 @@ Please use only for testing and development. Report issues - your feedback helps
       ;; Encourage using OpenRouter with Deepseek
       (emigo-model "openrouter/deepseek/deepseek-chat-v3-0324")
       (emigo-base-url "https://openrouter.ai/api/v1")
-      (emigo-api-key (getenv "OPENROUTER_API_KEY")))
+      ;; Securely load your API key (replace with your preferred method)
+      (emigo-api-key (emigo-read-file-content "~/.config/openrouter/key.txt")))
     ```
 
 ## Usage

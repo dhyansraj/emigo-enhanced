@@ -9,8 +9,6 @@
 ;; Copyright (C) 2025, Emigo, all rights reserved.
 ;; Created: 2025-03-29
 ;; Version: 0.5
-;; Last-Updated: Mon Apr  7 17:55:18 2025 (-0400)
-;;           By: Mingde (Matthew) Zeng
 ;; Package-Requires: ((emacs "26.1") (transient "0.3.0") (compat "30.0.2.0") (markdown-mode "2.6"))
 ;; Keywords: ai emacs llm aider ai-pair-programming tools
 ;; URL: https://github.com/MatthewZMD/emigo
@@ -82,9 +80,9 @@
              (emigo-epc-define-method mngr 'execute-command-sync 'emigo--execute-command-sync)
              (emigo-epc-define-method mngr 'list-files-sync 'emigo--list-files-sync)
              (emigo-epc-define-method mngr 'search-files-sync 'emigo--search-files-sync)
-             ;; Update flush-buffer signature to accept optional tool_id and tool_name
-             (emigo-epc-define-method mngr 'flush-buffer 'emigo--flush-buffer '((session-path string) (content string) (role string) &optional tool-id tool-name))
-             (emigo-epc-define-method mngr 'yes-or-no-p 'yes-or-no-p))))
+             (emigo-epc-define-method mngr 'flush-buffer 'emigo-flush-buffer)
+             (emigo-epc-define-method mngr 'yes-or-no-p 'yes-or-no-p)
+             (emigo-epc-define-method mngr 'get_history 'emigo--get-llm-history))))
     (if emigo-server
         (setq emigo-server-port (process-contact emigo-server :service))
       (error "[Emigo] emigo-server failed to start")))
@@ -92,7 +90,7 @@
 
 (defun emigo--eval-in-emacs-func (sexp-string)
   (eval (read sexp-string))
-  ;; Return nil to avoid epc error `Got too many parameters in the reply'.
+  ;; Return nil to avoid epc error `Got too many arguments in the reply'.
   nil)
 
 (defun emigo--get-emacs-var-func (var-name)
@@ -175,11 +173,7 @@ Searches parent directories for existing sessions."
 (defvar-local emigo--llm-output "" ;; Buffer-local LLM output accumulator
   "Accumulates the LLM output stream for the current interaction.")
 
-(defvar emigo--tool-json-block ""
-  "Tracks current fragments of a tool call JSON being inserted.")
-
-(defvar-local emigo-chat-file-info nil
-  "String displaying info about files in chat context (e.g., '3 files [1234 tokens]').")
+(defvar-local emigo-chat-file-info nil)
 
 (defvar emigo-epc-process nil)
 
@@ -266,7 +260,7 @@ Then Emigo will start by gdb, please send new issue with `emigo-name' buffer con
                           (list "profile"))
                         )))
 
-      ;; Set process parameters.
+      ;; Set process arguments.
       (if emigo-enable-debug
           (progn
             (setq emigo-internal-process-prog "gdb")
@@ -342,6 +336,11 @@ Then Emigo will start by gdb, please send new issue with `emigo-name' buffer con
 (defun emigo-enable ()
   (add-hook 'post-command-hook #'emigo-start-process))
 
+(defun emigo-read-file-content (filepath)
+  (with-temp-buffer
+    (insert-file-contents filepath)
+    (string-trim (buffer-string))))
+
 (defun emigo-update-header-line (session-path)
   (setq header-line-format (concat
                             (propertize (format " Project [%s]" (emigo-format-session-path session-path)) 'face font-lock-constant-face)
@@ -409,9 +408,6 @@ as the session path."
 
       ;; Add buffer to tracked list
       (add-to-list 'emigo-project-buffers buffer t) ;; Use t to avoid duplicates
-
-      (advice-add 'delete-other-windows :around #'emigo--advice-delete-other-windows)
-      (advice-add 'other-windows :around #'emigo--advice-other-window)
 
       ;; Switch to or display the buffer
       (emigo-create-window buffer) ;; Use the specific buffer
@@ -690,57 +686,36 @@ If on a prompt line:
         (delete-region (point) (point-max)))
       (emigo-call-async "emigo_send" emigo-session-path prompt))))
 
-(defun emigo--flush-buffer (session-path content &optional role tool-id tool-name)
+(defun emigo--flush-buffer (session-path content &optional role)
   "Flush CONTENT to the Emigo buffer associated with SESSION-PATH.
-ROLE indicates the type of content (e.g., 'user', 'llm', 'tool_json', 'tool_json_args').
-TOOL-ID is used for streaming tool JSON fragments.
-TOOL-NAME is provided explicitly when ROLE is 'tool_json'."
-  (let ((buffer (get-buffer (emigo-get-buffer-name t session-path)))) ;; Find existing buffer
+ROLE is optional and defaults to nil."
+  (let ((buffer-name (emigo-get-buffer-name nil session-path))
+        (buffer (get-buffer (emigo-get-buffer-name t session-path)))) ;; Find existing buffer
     (unless buffer
-      (warn "[Emigo] Could not find buffer for session %s to flush content: %s" session-path content)
-      (cl-return-from emigo--flush-buffer))
+      (warn "[Emigo] Could not find buffer for session %s to flush content." session-path)
+      (cl-return-from emigo-flush-buffer))
 
     (with-current-buffer buffer
       (save-excursion
-        (let ((inhibit-read-only t)) ;; Allow modification
-          ;; Go to the end of the buffer before the prompt
+        (let ((inhibit-read-only t)) ;; Allow modification even if buffer is read-only
+          ;; For all content, append at the appropriate position
           (goto-char (point-max))
           (when (search-backward-regexp (concat "^" emigo-prompt-symbol) nil t)
             (forward-line -2)
             (goto-char (line-end-position)))
 
-          ;; --- Insert new content based on role ---
-          (cond
-           ((equal role "user")
-            (insert (propertize content 'face font-lock-keyword-face)))
+          ;; Ensure content is a string before inserting
+          (let ((content (if (stringp content) content "")))
+            (if (equal role "user")
+                (insert (propertize content 'face font-lock-keyword-face))
+              (insert content)
+              ;; Accumulate LLM output locally for potential use (e.g., copying)
+              (setq-local emigo--llm-output (concat emigo--llm-output content))))
 
-           ((equal role "tool_json") ;; Start of a new tool call block
-            (let ((display-name (or tool-name "(unknown tool)")))
-              (insert (propertize (format "\n--- Tool Call: %s ---\n" display-name) 'face 'font-lock-comment-face))
-              (insert emigo--tool-json-block)))
+          ;; History is managed on the Python side
 
-           ((equal role "tool_json_args") ;; Middle part (arguments)
-            (setq emigo--tool-json-block (concat emigo--tool-json-block content))
-            (insert content)
-            (when (string-suffix-p "\\n" emigo--tool-json-block)
-              (insert "\n")))
-
-           ((equal role "tool_json_end") ;; Explicit end marker from Python
-            (unless (looking-back "\\n" 1) (insert "\n")) ;; Ensure newline before end marker
-            (insert (propertize "\n--- End Tool Call ---\n" 'face 'font-lock-comment-face))
-            (setq emigo--tool-json-block ""))
-
-           ((equal role "llm")
-            (unless (string-empty-p emigo--tool-json-block)
-              (setq emigo--tool-json-block ""))
-            (setq-local emigo--llm-output (concat emigo--llm-output content))
-            (insert content))
-
-           (t (insert content)))
-
-          ;; --- Update read-only region ---
           (goto-char (point-max))
-          (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+          (when (search-backward-regexp (concat "^" emigo-prompt-symbol) nil t)
             (forward-char (1- (length emigo-prompt-symbol)))
             (emigo-lock-region (point-min) (point))))))))
 
@@ -790,6 +765,12 @@ Skip the dedicated Emigo window when cycling."
       ;; Otherwise, return the window selected by the original call.
       target-window)))
 
+;; Add window management advice globally (or consider adding/removing in enable/disable)
+(advice-add 'delete-other-windows :around #'emigo--advice-delete-other-windows)
+;; Using :filter-return to modify the *result* of other-window might be cleaner,
+;; but let's stick with :around for consistency for now. Revisit if needed.
+;; (advice-add 'other-window :around #'emigo--advice-other-window)
+;; Let's try :filter-return for other-window as it's less intrusive
 (defun emigo--filter-return-other-window (window)
   "Filter return value of `other-window' to skip Emigo window."
   (if (and (emigo-window-exist-p emigo-window)
@@ -799,6 +780,11 @@ Skip the dedicated Emigo window when cycling."
       ;; A more robust solution would need access to the original args.
       (other-window 1)
     window))
+;; (advice-add 'other-window :filter-return #'emigo--filter-return-other-window)
+;; Reverting other-window advice for now as filter-return might cause infinite loops
+;; and the :around logic needs careful state checking. The original defadvice might
+;; have been sufficient or needs a more complex :around wrapper. Let's remove it
+;; until a better solution is found.
 
 ;; --- End Window Management Advice ---
 
@@ -858,26 +844,21 @@ The file path is relative to the session directory."
 
 ;; --- Tool Execution & Interaction Handlers (Called from Python) ---
 
-(defun emigo--request-tool-approval-sync (session-path tool-name params-json-string)
-  "Ask the user for approval to execute TOOL-NAME with PARAMS-JSON-STRING.
+(defun emigo--request-tool-approval-sync (session-path tool-name params-plist-string)
+  "Ask the user for approval to execute TOOL-NAME with PARAMS-PLIST-STRING.
 Return t if approved, nil otherwise. Called synchronously by the agent.
-PARAMS-JSON-STRING is expected to be a JSON string representing the parameters dictionary."
+PARAMS-PLIST-STRING is expected to be a string representation of an elisp plist, e.g. \"(:path \\\"foo.py\\\" :content \\\"bar\\\")\"."
   (interactive) ;; For testing, remove later if only called programmatically
-  (let* ((param-alist (ignore-errors (json-parse-string params-json-string :object-type 'alist))) ;; Parse JSON string into an alist
+  (let* ((params (ignore-errors (read params-plist-string)))
+         (param-alist (when (plistp params) (cl-loop for (key val) on params by #'cddr collect (cons key val))))
          (prompt-message
           (format "[Emigo Approval] Allow tool '%s' for session '%s'?\nParams:\n%s\nApprove? (y or n) "
                   tool-name
                   session-path
-                  (if (listp param-alist) ;; Check if parsing succeeded and resulted in a list (alist)
-                      (mapconcat (lambda (pair) (format "- %s: %S" (car pair) (cdr pair))) param-alist "\n")
-                    (format "Invalid JSON parameters received: %s" params-json-string))))) ;; Show raw string if JSON parsing failed
-    ;; Only proceed if parsing was successful
-    (if (listp param-alist)
-        (y-or-n-p prompt-message)
-      ;; If parsing failed, display error and deny automatically
-      (message "%s" prompt-message)
-      (ding)
-      nil)))
+                  (if param-alist
+                      (mapconcat (lambda (pair) (format "- %S: %S" (car pair) (cdr pair))) param-alist "\n")
+                    params-plist-string)))) ;; Show raw string if plist parsing failed
+    (y-or-n-p prompt-message)))
 
 (defun emigo--ask-user-sync (session-path question options-json-string)
   "Ask the user QUESTION in the context of SESSION-PATH.
@@ -970,6 +951,9 @@ Returns t on success, error string on failure."
                 (goto-char start-point)
                 (message "[Emigo] Inserting %d chars" (length replace-text))
                 (insert replace-text)
+                ;; Ensure newline at end if not present
+                (unless (looking-back "\n" 1)
+                  (insert "\n"))
                 ;; Mark buffer as modified for saving
                 (set-buffer-modified-p t)
                 (setq modified t))))))
@@ -1081,6 +1065,17 @@ MAX-MATCHES limits the number of matches per file (requires GNU grep >= 2.5.1)."
         (kill-buffer output-buffer)))
     ;; Return the raw grep output string (empty if no matches)
     results))
+
+(defun emigo--get-llm-history (session-path)
+  "Wrapper function called by Python EPC to get LLM history.
+This function is needed for EPC registration but the actual logic
+is handled by `emigo-call--sync \"get_history\" session-path`."
+  ;; This function itself doesn't need to do anything complex,
+  ;; as the call originates from Elisp (`emigo-show-history`)
+  ;; using `emigo-call--sync`. We just need a target for EPC registration.
+  ;; The actual retrieval happens in the Python method called by sync.
+  ;; Returning nil here as the sync call gets the value directly.
+  nil)
 
 (defun emigo--clear-local-buffer (session-path)
   "Clear the local Emacs buffer content and history for SESSION-PATH.

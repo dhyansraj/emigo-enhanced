@@ -29,16 +29,16 @@ import json
 import re
 import traceback
 import difflib
-from typing import Dict, List, Tuple, Optional, Any # Add Any
+from typing import Dict, List, Tuple, Optional
 
 # Import Session class for type hinting and accessing session state
 from session import Session
 # Import utilities for calling Emacs and file reading
-from utils import get_emacs_func_result, eval_in_emacs, read_file_content
+from utils import get_emacs_func_result, eval_in_emacs, read_file_content, get_emacs_var
 # Import system prompt constants for standard messages/prefixes
-from config import (
+from system_prompt import (
     TOOL_RESULT_SUCCESS, TOOL_RESULT_OUTPUT_PREFIX,
-    TOOL_DENIED, TOOL_ERROR_PREFIX, TOOL_ERROR_SUFFIX
+    TOOL_REPLACE_IN_FILE, TOOL_DENIED, TOOL_ERROR_PREFIX, TOOL_ERROR_SUFFIX
 )
 
 # --- Helper Functions ---
@@ -62,9 +62,9 @@ def _posix_path(path: str) -> str:
 
 # --- Tool Implementations ---
 
-def execute_command(session: Session, parameters: Dict[str, Any]) -> str:
+def execute_command(session: Session, params: Dict[str, str]) -> str:
     """Executes a shell command via Emacs."""
-    command = parameters.get("command")
+    command = params.get("command")
     if not command:
         return _format_tool_error("Missing required parameter 'command'")
 
@@ -77,9 +77,9 @@ def execute_command(session: Session, parameters: Dict[str, Any]) -> str:
         print(f"Error executing command '{command}' via Emacs: {e}", file=sys.stderr)
         return _format_tool_error(f"Error executing command: {e}")
 
-def read_file(session: Session, parameters: Dict[str, Any]) -> str:
+def read_file(session: Session, params: Dict[str, str]) -> str:
     """Reads a file, adds it to context, and updates the session cache."""
-    rel_path = parameters.get("path")
+    rel_path = params.get("path")
     if not rel_path:
         return _format_tool_error("Missing required parameter 'path'")
 
@@ -109,13 +109,13 @@ def read_file(session: Session, parameters: Dict[str, Any]) -> str:
         session.invalidate_cache(rel_path) # Invalidate cache on error
         return _format_tool_error(f"Error reading file: {e}")
 
-def write_to_file(session: Session, parameters: Dict[str, Any]) -> str:
+def write_to_file(session: Session, params: Dict[str, str]) -> str:
     """Writes content to a file and updates the session cache."""
-    rel_path = parameters.get("path")
-    content = parameters.get("content") # Use get for content as well
+    rel_path = params.get("path")
+    content = params.get("content")
     if not rel_path:
         return _format_tool_error("Missing required parameter 'path'")
-    if content is None: # Check if content is None (missing)
+    if content is None: # Allow empty string content
         return _format_tool_error("Missing required parameter 'content'")
 
     abs_path = _resolve_path(session.session_path, rel_path)
@@ -161,46 +161,43 @@ def _parse_search_replace_blocks(diff_str: str) -> Tuple[List[Tuple[str, str]], 
     # Use regex to find all blocks non-greedily
     pattern = re.compile(
         re.escape(search_marker) +
-        '(.*?)' +  # Capture search text (non-greedy)
+        '(.*?)' + # Capture search text (non-greedy)
         re.escape(divider_marker) +
-        '(.*?)' +  # Capture replace text (non-greedy)
+        '(.*?)' + # Capture replace text (non-greedy)
         re.escape(replace_marker),
-        re.DOTALL  # Allow '.' to match newlines
+        re.DOTALL # Allow '.' to match newlines
     )
 
-    found_blocks_raw = pattern.findall(diff_str)
+    found_blocks = pattern.findall(diff_str)
 
-    if not found_blocks_raw:
+    if not found_blocks:
         # Check for common markdown fence if no blocks found
         if "```" in diff_str and search_marker not in diff_str:
-            return [], "Diff content seems to be a markdown code block, not a SEARCH/REPLACE block."
+             return [], "Diff content seems to be a markdown code block, not a SEARCH/REPLACE block."
         return [], "No valid SEARCH/REPLACE blocks found in the provided diff."
 
-    for search_text, replace_text in found_blocks_raw:
+    for search_text, replace_text in found_blocks:
         # Basic validation: ensure markers are not nested within text itself in unexpected ways
-        # This check is basic and might not catch all complex nesting scenarios.
         if search_marker in search_text or divider_marker in search_text or replace_marker in search_text or \
            search_marker in replace_text or divider_marker in replace_text or replace_marker in replace_text:
-            return [], f"Detected malformed or nested SEARCH/REPLACE markers within a block's content:\nSearch:\n{search_text}\nReplace:\n{replace_text}"
-
-        # Optional: Remove trailing newline from replace_text if needed,
-        # but generally keep content as-is from the LLM.
-        # if replace_text.endswith('\n'):
-        #     replace_text = replace_text[:-1]
-
+            # This is a simplistic check; complex nesting could still fool it.
+            # Consider more robust parsing if needed.
+            return [], "Detected malformed or nested SEARCH/REPLACE markers within a block's content."
         blocks.append((search_text, replace_text))
 
     return blocks, None
 
-def _get_line_number(text: str, char_index: int) -> int:
-    """Calculates the 1-based line number for a given character index."""
-    return text.count('\n', 0, char_index) + 1
 
-def replace_in_file(session: Session, parameters: Dict[str, str]) -> str:
+def replace_in_file(session: Session, params: Dict[str, str]) -> str:
     """Replaces content in a file using SEARCH/REPLACE blocks via Emacs."""
-    rel_path = parameters.get("path")
-    diff_str = parameters.get("diff")
+    rel_path = params.get("path")
+    diff_str = params.get("diff")
     similarity_threshold = 0.85 # Configurable threshold (85%)
+
+    if not rel_path:
+        return _format_tool_error(f"Missing required parameter 'path' for {TOOL_REPLACE_IN_FILE}")
+    if not diff_str:
+        return _format_tool_error(f"Missing required parameter 'diff' (SEARCH/REPLACE block) for {TOOL_REPLACE_IN_FILE}")
 
     abs_path = os.path.abspath(os.path.join(session.session_path, rel_path))
     posix_rel_path = rel_path.replace(os.sep, '/')
@@ -225,7 +222,6 @@ def replace_in_file(session: Session, parameters: Dict[str, str]) -> str:
 
         # --- Parse *All* Diff Blocks ---
         parsed_blocks, parse_error = _parse_search_replace_blocks(diff_str)
-        print("Block", parsed_blocks, "Error", parse_error)
         if parse_error:
             return _format_tool_error(parse_error)
         if not parsed_blocks:
@@ -257,63 +253,57 @@ def replace_in_file(session: Session, parameters: Dict[str, str]) -> str:
 
             found_match_for_block = False
             # Iterate through each line of the actual file content as a potential start
-            # Use range(len(file_lines)) to avoid issues if file_lines is modified (it shouldn't be here)
             for file_start_index in range(len(file_lines)):
                 # Check if this starting line is already part of a previous successful match
                 if file_start_index in already_matched_file_line_indices:
-                    continue # Skip this starting line if it's already consumed
+                    continue
 
-                # --- Attempt to match the *entire* search block starting here ---
-                current_match_len = 0
-                potential_match_indices = set() # Track indices for this *potential* match
-                all_search_lines_matched_sequentially = True
+                # Compare the first search line (stripped) with the current file line (stripped)
+                match_ratio = _compare_stripped_lines(search_lines[0], file_lines[file_start_index])
 
-                for search_line_index in range(len(search_lines)):
-                    current_file_index = file_start_index + search_line_index
+                if match_ratio >= similarity_threshold:
+                    # First line matches, now try to match subsequent lines sequentially
+                    match_len = 1 # Number of matched lines so far
+                    all_search_lines_matched = True
+                    for search_line_index in range(1, len(search_lines)):
+                        file_line_index = file_start_index + search_line_index
+                        # Check if we've run out of file lines or if the line is already matched
+                        if file_line_index >= len(file_lines) or file_line_index in already_matched_file_line_indices:
+                            all_search_lines_matched = False
+                            break # Cannot match further
 
-                    # Check bounds and if the *current* file line is already consumed
-                    if current_file_index >= len(file_lines) or current_file_index in already_matched_file_line_indices:
-                        all_search_lines_matched_sequentially = False
-                        # print(f"  Debug: Match failed at search line {search_line_index+1}: File index {current_file_index} out of bounds or already matched.", file=sys.stderr)
-                        break # Cannot match further from this file_start_index
+                        # Compare current search line with corresponding file line
+                        subsequent_match_ratio = _compare_stripped_lines(search_lines[search_line_index], file_lines[file_line_index])
+                        if subsequent_match_ratio < similarity_threshold:
+                            all_search_lines_matched = False
+                            break # Mismatch found, abandon this sequence attempt
+                        match_len += 1 # This line matched, increment count
 
-                    # Compare current search line with corresponding file line (stripped)
-                    match_ratio = _compare_stripped_lines(search_lines[search_line_index], file_lines[current_file_index])
+                    # Check if all search lines were matched sequentially for this attempt
+                    if all_search_lines_matched:
+                        # --- Match Found for this block ---
+                        start_line_num = file_start_index + 1 # 1-based line number
+                        # End line is the start line + number of matched lines
+                        end_line_num_inclusive = start_line_num + match_len - 1
+                        # Elisp needs the line number *after* the last line to delete
+                        elisp_end_line_num = end_line_num_inclusive + 1
 
-                    if match_ratio < similarity_threshold:
-                        all_search_lines_matched_sequentially = False
-                        # print(f"  Debug: Match failed at search line {search_line_index+1}: Similarity {match_ratio:.2f} < {similarity_threshold} for file index {current_file_index}.", file=sys.stderr)
-                        break # Mismatch found, abandon this sequence attempt for this file_start_index
+                        replacements_to_apply.append((start_line_num, elisp_end_line_num, replace_text))
+                        found_match_for_block = True
 
-                    # Line matches, record index for this potential block match
-                    potential_match_indices.add(current_file_index)
-                    current_match_len += 1
+                        # Mark the file lines used by this match as consumed
+                        for i in range(match_len):
+                            already_matched_file_line_indices.add(file_start_index + i)
 
-                # --- Check if the *entire block* matched sequentially ---
-                if all_search_lines_matched_sequentially:
-                    # --- Match Found for this block ---
-                    start_line_num = file_start_index + 1 # 1-based line number
-                    # End line is the start line + number of matched lines
-                    end_line_num_inclusive = start_line_num + current_match_len - 1
-                    # Elisp needs the line number *after* the last line to delete
-                    elisp_end_line_num = end_line_num_inclusive + 1
-
-                    replacements_to_apply.append((start_line_num, elisp_end_line_num, replace_text))
-                    found_match_for_block = True
-
-                    # Mark the file lines used by this *confirmed* match as consumed
-                    already_matched_file_line_indices.update(potential_match_indices)
-
-                    print(f"Block {block_index+1}: Found sequential match for lines {start_line_num}-{end_line_num_inclusive} (Elisp end: {elisp_end_line_num}) in '{posix_rel_path}'", file=sys.stderr)
-
-                    # Stop searching for *this specific block* once a match is found
-                    break # Exit the inner loop (file_start_index loop) and move to the next block in parsed_blocks
+                        print(f"Block {block_index+1}: Found sequential match for lines {start_line_num}-{end_line_num_inclusive} (Elisp end: {elisp_end_line_num}) in '{posix_rel_path}'", file=sys.stderr)
+                        # Stop searching for this specific block once a match is found
+                        break # Move to the next block
 
             # If no match was found for this block after checking all possible start lines
             if not found_match_for_block:
                  errors.append(
                     f"Block {block_index+1}: Could not find a sequential match for the SEARCH text in '{posix_rel_path}'.\n"
-                    f"SEARCH block start:\n```\n{''.join(search_lines[:5])}{'...' if len(search_lines) > 5 else ''}\n```" # Show start of block
+                    f"SEARCH block:\n```\n{search_text}```"
                  )
 
         # --- Handle Errors or Proceed ---
@@ -372,29 +362,28 @@ def replace_in_file(session: Session, parameters: Dict[str, str]) -> str:
         return _format_tool_error(f"Error processing replacement for {posix_rel_path}: {e}")
 
 
-def ask_followup_question(session: Session, parameters: Dict[str, Any]) -> str:
+def ask_followup_question(session: Session, params: Dict[str, str]) -> str:
     """Asks the user a question via Emacs."""
-    question = parameters.get("question")
-    # Options should be a list of strings from the parsed JSON parameters
-    options_list = parameters.get("options")
-
+    question = params.get("question")
+    options_str = params.get("options") # Optional: "[Option1, Option2]" as JSON string
     if not question:
         return _format_tool_error("Missing required parameter 'question'")
 
     try:
-        # Validate options_list and convert to JSON string for Elisp
-        options_json_str = "[]"
-        if isinstance(options_list, list) and all(isinstance(opt, str) for opt in options_list):
-            # Ensure 2-5 options as per original prompt description (optional check)
-            if 2 <= len(options_list) <= 5:
-                 options_json_str = json.dumps(options_list)
-            else:
-                 print(f"Warning: Received {len(options_list)} options, expected 2-5. Sending empty options.", file=sys.stderr)
-        elif options_list is not None: # If options provided but not a list of strings
-             print(f"Warning: Invalid format for options, expected list of strings: {options_list}. Sending empty options.", file=sys.stderr)
+        # Validate and prepare options JSON string
+        valid_options_str = "[]"
+        if options_str:
+            try:
+                parsed_options = json.loads(options_str)
+                if isinstance(parsed_options, list):
+                    valid_options_str = options_str # Use original if valid list
+                else:
+                    print(f"Warning: Invalid format for options, expected JSON array string: {options_str}", file=sys.stderr)
+            except json.JSONDecodeError:
+                print(f"Warning: Invalid JSON for options: {options_str}", file=sys.stderr)
 
         # Ask Emacs to present the question and get the user's answer (synchronous)
-        answer = get_emacs_func_result("ask-user-sync", session.session_path, question, options_json_str)
+        answer = get_emacs_func_result("ask-user-sync", session.session_path, question, valid_options_str)
 
         if answer is None or answer == "": # Check for nil or empty string from Emacs
             # User likely cancelled or provided no input
@@ -407,12 +396,12 @@ def ask_followup_question(session: Session, parameters: Dict[str, Any]) -> str:
         print(f"Error asking followup question via Emacs: {e}", file=sys.stderr)
         return _format_tool_error(f"Error asking question: {e}")
 
-def attempt_completion(session: Session, parameters: Dict[str, Any]) -> str:
+def attempt_completion(session: Session, params: Dict[str, str]) -> str:
     """Signals completion to Emacs."""
-    result_text = parameters.get("result")
-    command = parameters.get("command") # Optional command to demonstrate
+    result_text = params.get("result")
+    command = params.get("command") # Optional command to demonstrate
 
-    if result_text is None: # Check if result is missing
+    if result_text is None: # Allow empty string result
         return _format_tool_error("Missing required parameter 'result'")
 
     try:
@@ -425,9 +414,8 @@ def attempt_completion(session: Session, parameters: Dict[str, Any]) -> str:
         print(f"Error signalling completion to Emacs: {e}", file=sys.stderr)
         return _format_tool_error(f"Error signalling completion: {e}")
 
-def list_repomap(session: Session, parameters: Dict[str, Any]) -> str:
-    """Generates and caches the repository map. Ignores parameters."""
-    # This tool takes no parameters, so 'parameters' dict is ignored.
+def list_repomap(session: Session, params: Dict[str, str]) -> str:
+    """Generates and caches the repository map."""
     try:
         chat_files = session.get_chat_files()
         print(f"Generating repomap for {session.session_path} with chat files: {chat_files}", file=sys.stderr)
@@ -446,14 +434,10 @@ def list_repomap(session: Session, parameters: Dict[str, Any]) -> str:
         session.set_last_repomap(None) # Clear stored map on error
         return _format_tool_error(f"Error generating repository map: {e}")
 
-def list_files(session: Session, parameters: Dict[str, Any]) -> str:
+def list_files(session: Session, params: Dict[str, str]) -> str:
     """Lists files in a directory via Emacs."""
-    rel_path = parameters.get("path", ".") # Default to session path root
-    recursive = parameters.get("recursive", False) # Default to False if missing or not bool
-
-    # Ensure recursive is boolean
-    if not isinstance(recursive, bool):
-        recursive = str(recursive).lower() == "true"
+    rel_path = params.get("path", ".") # Default to session path root
+    recursive = params.get("recursive", "false").lower() == "true"
 
     abs_path = _resolve_path(session.session_path, rel_path)
     posix_rel_path = _posix_path(rel_path)
@@ -469,27 +453,16 @@ def list_files(session: Session, parameters: Dict[str, Any]) -> str:
         print(f"Error listing files via Emacs: {e}", file=sys.stderr)
         return _format_tool_error(f"Error listing files: {e}")
 
-def search_files(session: Session, parameters: Dict[str, Any]) -> str:
+def search_files(session: Session, params: Dict[str, str]) -> str:
     """Searches files using Emacs's capabilities."""
-    rel_path = parameters.get("path", ".")
-    pattern = parameters.get("pattern")
-    case_sensitive = parameters.get("case_sensitive", False) # Default to False
-    max_matches_arg = parameters.get("max_matches", 50) # Default to 50
+    rel_path = params.get("path", ".")
+    pattern = params.get("pattern")
+    case_sensitive = params.get("case_sensitive", "false").lower() == "true"
+    # Use a slightly larger default, capped reasonably
+    max_matches = min(200, int(params.get("max_matches", "50")))
 
     if not pattern:
-        return _format_tool_error("Missing required parameter 'pattern'")
-
-    # Validate/sanitize max_matches
-    try:
-        max_matches = min(200, int(max_matches_arg)) # Cap at 200
-        if max_matches <= 0:
-            max_matches = 50 # Ensure positive, default 50
-    except (ValueError, TypeError):
-        max_matches = 50 # Default if conversion fails
-
-    # Ensure case_sensitive is boolean
-    if not isinstance(case_sensitive, bool):
-        case_sensitive = str(case_sensitive).lower() == "true"
+        return _format_tool_error("Missing 'pattern' parameter.")
 
     abs_path = _resolve_path(session.session_path, rel_path)
     posix_rel_path = _posix_path(rel_path)
@@ -511,3 +484,33 @@ def search_files(session: Session, parameters: Dict[str, Any]) -> str:
     except Exception as e:
         print(f"Error searching files via Emacs: {e}\n{traceback.format_exc()}", file=sys.stderr)
         return _format_tool_error(f"Error searching files: {e}")
+
+# --- Tool Dispatcher ---
+
+# Map tool names (from system_prompt.py) to implementation functions
+TOOL_HANDLER_MAP = {
+    "execute_command": execute_command,
+    "read_file": read_file,
+    "write_to_file": write_to_file,
+    "replace_in_file": replace_in_file,
+    "ask_followup_question": ask_followup_question,
+    "attempt_completion": attempt_completion,
+    "list_repomap": list_repomap,
+    "list_files": list_files,
+    "search_files": search_files,
+}
+
+def dispatch_tool(session: Session, tool_name: str, params: Dict[str, str]) -> str:
+    """Finds and calls the appropriate tool implementation."""
+    handler = TOOL_HANDLER_MAP.get(tool_name)
+    if not handler:
+        print(f"Unknown tool requested: {tool_name}", file=sys.stderr)
+        return _format_tool_error(f"Unknown tool: {tool_name}")
+
+    try:
+        # Call the handler function, passing the session object and params
+        return handler(session, params)
+    except Exception as e:
+        # Catch errors within the handler itself
+        print(f"Error during execution of tool '{tool_name}': {e}\n{traceback.format_exc()}", file=sys.stderr)
+        return _format_tool_error(f"Error executing tool '{tool_name}': {e}")

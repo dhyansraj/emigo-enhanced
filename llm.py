@@ -14,7 +14,7 @@ passing the complete message history for each API call.
 """
 
 import importlib
-import json
+import json # Added for verbose logging
 import os
 import sys
 import time
@@ -117,12 +117,9 @@ class LLMClient:
         messages: List[Dict],
         stream: bool = True,
         temperature: float = 0.7,
-        tools: Optional[List[Dict]] = None, # Add tools parameter
-        tool_choice: Optional[str] = "auto", # Add tool_choice parameter
-    ) -> Union[Iterator[str], object]: # Return type might be object for raw response
+    ) -> Union[Iterator[str], str]:
         """
-        Sends the provided messages list to the LLM, potentially with tool definitions,
-        and returns the response.
+        Sends the provided messages list to the LLM and returns the response.
 
         Args:
             messages: The list of message dictionaries to send.
@@ -142,11 +139,6 @@ class LLMClient:
             "stream": stream,
             "temperature": temperature,
         }
-        # Add tools and tool_choice if provided and not None/empty
-        if tools:
-            completion_kwargs["tools"] = tools
-        if tool_choice: # Only add if tool_choice is meaningful
-            completion_kwargs["tool_choice"] = tool_choice # e.g., "auto", "required", specific tool
 
         # Add API key and base URL if they were provided
         if self.api_key:
@@ -159,14 +151,10 @@ class LLMClient:
                  completion_kwargs["model"] = self.model_name.replace("ollama/", "")
 
         try:
-            # Store the raw response object for potential parsing later (e.g., tool calls)
-            self.last_response_object = None # Initialize
-
-            # Initiate the LLM call
+            # Initiate the LLM call first
             response = litellm.completion(**completion_kwargs)
-            self.last_response_object = response # Store the raw response
 
-            # --- Verbose Logging ---
+            # --- Verbose Logging (Moved After Call Initiation) ---
             if self.verbose:
                 # Import json here if not already imported at the top level
                 import json
@@ -210,72 +198,58 @@ class LLMClient:
             # --- End Verbose Logging ---
 
             if stream:
-                # Generator to yield the raw litellm chunk objects
-                def raw_chunk_stream():
-                    # Move the try/except block inside the generator
-                    try:
-                        # The 'response' variable is accessible due to closure
-                        for chunk in response:
-                            # print(f"Raw chunk: {chunk}") # DEBUG: Ensure this is commented out
-                            yield chunk # Yield the original chunk object
-                    except litellm.exceptions.APIConnectionError as e: # Catch specific error
-                        # Log the specific error clearly
-                        # Add more detail from the exception object if possible
-                        error_details = f"Caught APIConnectionError: {e}\n"
-                        # Check for attributes that might hold response data (common in httpx/openai errors)
-                        if hasattr(e, 'response') and e.response:
-                            try:
-                                error_details += f"  Response Status: {getattr(e.response, 'status_code', 'N/A')}\n"
-                                # Limit printing potentially large response content
-                                response_text = getattr(e.response, 'text', '')
-                                error_details += f"  Response Content (first 500 chars): {response_text[:500]}{'...' if len(response_text) > 500 else ''}\n"
-                            except Exception as detail_err: error_details += f"  (Error getting response details: {detail_err})\n"
-                        if hasattr(e, 'request') and e.request:
-                             try:
-                                error_details += f"  Request URL: {getattr(e.request, 'url', 'N/A')}\n"
-                             except Exception as detail_err: error_details += f"  (Error getting request details: {detail_err})\n"
-                        print(f"\n[LLMClient Stream Error] {error_details}", file=sys.stderr)
-                        print("[LLMClient Stream Error] Stream may be incomplete.", file=sys.stderr)
-                        # Yield an error marker instead of just passing
-                        yield {"_stream_error": True, "error_message": str(e)}
-                    except Exception as e:
-                        # Catch other potential errors during streaming
-                        # Add similar detailed logging
-                        error_details = f"Caught unexpected error: {type(e).__name__} - {e}\n"
-                        if hasattr(e, 'response') and e.response:
-                            try:
-                                error_details += f"  Response Status: {getattr(e.response, 'status_code', 'N/A')}\n"
-                                response_text = getattr(e.response, 'text', '')
-                                error_details += f"  Response Content (first 500 chars): {response_text[:500]}{'...' if len(response_text) > 500 else ''}\n"
-                            except Exception as detail_err: error_details += f"  (Error getting response details: {detail_err})\n"
-                        if hasattr(e, 'request') and e.request:
-                             try:
-                                error_details += f"  Request URL: {getattr(e.request, 'url', 'N/A')}\n"
-                             except Exception as detail_err: error_details += f"  (Error getting request details: {detail_err})\n"
-                        # Include traceback for unexpected errors
-                        import traceback
-                        error_details += f"  Traceback:\n{traceback.format_exc()}\n"
-                        print(f"\n[LLMClient Stream Error] {error_details}", file=sys.stderr)
-                        # Yield an error marker
-                        yield {"_stream_error": True, "error_message": str(e)}
+                # Generator to yield content chunks
+                def content_stream():
+                    full_response_content = ""
+                    for chunk in response:
+                        # Check if chunk and choices are valid
+                        if chunk and chunk.choices and len(chunk.choices) > 0:
+                             delta = chunk.choices[0].delta
+                             # Check if delta and content are valid
+                             if delta and delta.content:
+                                 content_piece = delta.content
+                                 full_response_content += content_piece
+                                 yield content_piece
+                    # Optionally store the full response after streaming for history
+                    # self._last_full_response = full_response_content
 
-                return raw_chunk_stream() # Return the generator yielding full chunks
+                return content_stream()
             else:
-                # For non-streaming, return the raw response object
-                # The caller (llm_worker) will parse content or tool calls
-                return response # Return the whole LiteLLM response object
+                # Return the full content directly for non-streaming
+                if response and response.choices and len(response.choices) > 0:
+                    message = response.choices[0].message
+                    return message.content or ""
+                else:
+                    print("Warning: Received empty or invalid non-streaming response from LLM.", file=sys.stderr)
+                    return ""
 
-        # Keep exception handling for non-streaming calls or errors *before* streaming starts
         except litellm.APIConnectionError as e:
-             error_message = f"API Connection Error (pre-stream or non-stream): {e}"
-             print(f"\n{error_message}", file=sys.stderr)
-             # For non-streaming, return the error string
-             return f"[LLM Error: {error_message}]"
+            # Handle connection errors specifically (like the OpenRouterException)
+            error_message = f"API Connection Error: {e}"
+            print(f"\n{error_message}", file=sys.stderr)
+            # Optionally log the messages sent for debugging
+            # print(f"Messages sent: {messages}", file=sys.stderr)
+            if stream:
+                # Yield the error message as part of the stream
+                def error_stream():
+                    yield f"[LLM Error: {error_message}]"
+                return error_stream()
+            else:
+                return f"[LLM Error: {error_message}]" # Return error message directly
+
         except Exception as e:
-             error_message = f"General Error (pre-stream or non-stream): {e}"
-             print(f"\n{error_message}", file=sys.stderr)
-             # For non-streaming, return the error string
-             return f"[LLM Error: {error_message}]"
+            # Catch other potential exceptions from litellm
+            error_message = f"General Error during LLM communication: {e}"
+            print(f"\n{error_message}", file=sys.stderr)
+            # Optionally log the messages sent for debugging
+            # print(f"Messages sent: {messages}", file=sys.stderr)
+            if stream:
+                 # Yield the error message as part of the stream
+                def error_stream():
+                    yield f"[LLM Error: {error_message}]"
+                return error_stream()
+            else:
+                return f"[LLM Error: {error_message}]" # Return error message directly
 
 
 # --- Example Usage (Optional) ---
@@ -325,6 +299,7 @@ def main():
     messages.append({"role": "assistant", "content": full_streamed_response})
 
     print("\n--- Final Messages List ---")
+    import json
     print(json.dumps(messages, indent=2))
 
 

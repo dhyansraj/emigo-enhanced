@@ -2,12 +2,6 @@
 # -*- coding: utf-8 -*-
 
 """
-Copyright (C) 2025 Emigo
-Author: Mingde (Matthew) Zeng <matthewzmd@posteo.net>
-        Andy Stewart <lazycat.manatee@gmail.com>
-Maintainer: Mingde (Matthew) Zeng <matthewzmd@posteo.net>
-            Andy Stewart <lazycat.manatee@gmail.com>
-
 The central orchestrator for the Emigo Python backend.
 
 This module runs the Python-side EPC (Emacs Process Communication) server,
@@ -31,6 +25,24 @@ Note: This module currently has a wide range of responsibilities and could
 potentially be refactored for better separation of concerns in the future.
 """
 
+# Copyright (C) 2025 Emigo
+#
+# Author: Mingde (Matthew) Zeng <matthewzmd@posteo.net>
+#         Andy Stewart <lazycat.manatee@gmail.com>
+# Maintainer: Mingde (Matthew) Zeng <matthewzmd@posteo.net>
+#             Andy Stewart <lazycat.manatee@gmail.com>
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
 import sys
@@ -42,10 +54,8 @@ import queue
 import time
 import re
 from typing import Dict, List, Optional, Tuple
-from config import (
-    TOOL_DENIED
-)
-from tool_definitions import (
+from system_prompt import (
+    TOOL_DENIED,
     # Tool Names
     TOOL_EXECUTE_COMMAND, TOOL_WRITE_TO_FILE,
     TOOL_ATTEMPT_COMPLETION
@@ -57,11 +67,7 @@ from utils import (
 )
 from session import Session
 # Import tool dispatcher
-# Import tool definitions and dispatcher
 import tools
-from tool_definitions import get_tool
-# Import json for displaying parameters during approval
-from typing import Any # Add Any
 
 class Emigo:
     def __init__(self, args):
@@ -69,7 +75,7 @@ class Emigo:
         # Init EPC client port.
         print(f"Emigo __init__: Received args: {args}", file=sys.stderr, flush=True) # DEBUG + flush
         if not args:
-            print("Emigo __init__: ERROR - No parameters received (expected EPC port). Exiting.", file=sys.stderr, flush=True)
+            print("Emigo __init__: ERROR - No arguments received (expected EPC port). Exiting.", file=sys.stderr, flush=True)
             sys.exit(1)
         try:
             elisp_epc_port = int(args[0])
@@ -91,12 +97,14 @@ class Emigo:
 
         # --- Worker Process Management ---
         self.llm_worker_process: Optional[subprocess.Popen] = None
-        self.llm_worker_reader_thread: Optional[threading.Thread] = None
-        self.llm_worker_stderr_thread: Optional[threading.Thread] = None
+        self.llm_worker_reader_thread: Optional[threading.Thread] = None # Initialize to None
+        self.llm_worker_stderr_thread: Optional[threading.Thread] = None # Initialize to None
         self.llm_worker_lock = threading.Lock()
-        self.worker_output_queue = queue.Queue() # Messages from worker stdout
-        self.pending_tool_requests: Dict[str, Dict] = {} # {request_id (tool_call_id): original_tool_request_data}
+        self.worker_output_queue = queue.Queue() # Queue for messages from worker stdout
+        self.pending_tool_requests: Dict[str, Dict] = {} # {request_id: original_tool_request_data}
         self.active_interaction_session: Optional[str] = None # Track which session is currently interacting
+        # Removed repo_mappers and session_caches, now managed by Session objects
+
 
         # --- EPC Server Setup ---
         print("Emigo __init__: Setting up Python EPC server...", file=sys.stderr, flush=True) # DEBUG + flush
@@ -201,31 +209,25 @@ class Emigo:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, # Capture stderr
                     text=True, # Work with text streams
-                    encoding='utf-8', # Ensure UTF-8 for JSON
-                    bufsize=0, # Use 0 for unbuffered binary mode (stdin/stdout)
-                    # bufsize=1, # Use 1 for line buffered text mode
-                    cwd=os.path.dirname(worker_script_path), # Set CWD to script's directory
-                    # Use process_group=True on Unix-like systems if needed for cleaner termination
-                    # process_group=True if os.name != 'nt' else False
+                    encoding='utf-8',
+                    bufsize=1, # Line buffered
+                    cwd=os.path.dirname(worker_script_path) # Set CWD to script's directory
                 )
                 # Brief pause to see if process exits immediately
-                time.sleep(0.5) # Increased sleep time
+                time.sleep(0.2)
                 if self.llm_worker_process.poll() is not None:
                     print(f"_start_llm_worker: ERROR - LLM worker process exited immediately with code {self.llm_worker_process.poll()}.", file=sys.stderr, flush=True)
                     # Try reading stderr quickly
                     try:
-                        stderr_output = self.llm_worker_process.stderr.read() if self.llm_worker_process.stderr else "N/A"
+                        stderr_output = self.llm_worker_process.stderr.read()
                         print(f"_start_llm_worker: Worker stderr upon exit:\n{stderr_output}", file=sys.stderr, flush=True)
                     except Exception as read_err:
                         print(f"_start_llm_worker: Error reading worker stderr after exit: {read_err}", file=sys.stderr, flush=True)
-
-                    # Regardless of stderr read success, set process to None and notify Emacs
-                    exit_code = self.llm_worker_process.poll() # Get exit code again just in case
-                    self.llm_worker_process = None
-                    message_emacs(f"Error: LLM worker process failed to start (exit code {exit_code}). Check *Messages* or Emigo process buffer.")
+                        self.llm_worker_process = None
+                        message_emacs(f"Error: LLM worker process failed to start (exit code {self.llm_worker_process.poll()}). Check *Messages* or Emigo process buffer.")
                     return # Exit the function
 
-                print(f"_start_llm_worker: LLM worker started (PID: {self.llm_worker_process.pid}).", file=sys.stderr, flush=True)
+                print(f"_start_llm_worker: LLM worker started (PID: {self.llm_worker_process.pid}).", file=sys.stderr, flush=True) # DEBUG + flush
 
                 # Create and start the stdout reader thread *after* process starts
                 print("_start_llm_worker: Starting stdout reader thread...", file=sys.stderr, flush=True) # DEBUG + flush
@@ -301,53 +303,33 @@ class Emigo:
 
     def _read_worker_stdout(self):
         """Reads stdout lines from the worker and puts them in a queue."""
-        # Use a loop that checks if the process is alive
-        proc = self.llm_worker_process # Local reference
-        if proc and proc.stdout:
+        while self.llm_worker_process and self.llm_worker_process.stdout:
             try:
-                for line in iter(proc.stdout.readline, ''):
-                    if line:
-                        self.worker_output_queue.put(line.strip())
-                    else:
-                        # Empty string indicates EOF (stream closed)
-                        print("LLM worker stdout stream ended (EOF).", file=sys.stderr)
-                        break
-            except ValueError as e:
-                # Catch ValueError: I/O operation on closed file.
-                print(f"Error reading from LLM worker stdout (stream likely closed): {e}", file=sys.stderr)
+                line = self.llm_worker_process.stdout.readline()
+                if not line:
+                    print("LLM worker stdout stream ended.", file=sys.stderr)
+                    break # End of stream
+                self.worker_output_queue.put(line.strip())
             except Exception as e:
-                # Handle other exceptions during read
+                # Handle exceptions during read, e.g., if process dies unexpectedly
                 print(f"Error reading from LLM worker stdout: {e}", file=sys.stderr)
-            finally:
-                # Ensure the sentinel is put even if errors occur or loop finishes
-                print("Signaling end of worker output.", file=sys.stderr)
-                self.worker_output_queue.put(None)
-        else:
-            print("Worker process or stdout not available for reading.", file=sys.stderr)
-            # Still signal end if the thread was started but process died quickly
-            self.worker_output_queue.put(None)
+                break
+            # Signal end of output (optional)
+        self.worker_output_queue.put(None)
 
     def _read_worker_stderr(self):
         """Reads and prints stderr lines from the worker."""
-        # Use a loop that checks if the process is alive
-        proc = self.llm_worker_process # Local reference
-        if proc and proc.stderr:
+        while self.llm_worker_process and self.llm_worker_process.stderr:
             try:
-                for line in iter(proc.stderr.readline, ''):
-                    if line:
-                        # Print worker errors clearly marked
-                        print(f"[WORKER_STDERR] {line.strip()}", file=sys.stderr, flush=True)
-                    else:
-                        # Empty string indicates EOF
-                        print("LLM worker stderr stream ended (EOF).", file=sys.stderr)
-                        break
-            except ValueError as e:
-                # Catch ValueError: I/O operation on closed file.
-                print(f"Error reading from LLM worker stderr (stream likely closed): {e}", file=sys.stderr)
+                line = self.llm_worker_process.stderr.readline()
+                if not line:
+                    print("LLM worker stderr stream ended.", file=sys.stderr)
+                    break
+                # Print worker errors clearly marked
+                print(f"[WORKER_STDERR] {line.strip()}", file=sys.stderr)
             except Exception as e:
                 print(f"Error reading from LLM worker stderr: {e}", file=sys.stderr)
-        else:
-            print("Worker process or stderr not available for reading.", file=sys.stderr)
+                break
 
     def _send_to_worker(self, data: Dict):
         """Sends a JSON message to the worker's stdin."""
@@ -364,32 +346,18 @@ class Emigo:
 
             if self.llm_worker_process and self.llm_worker_process.stdin:
                 try:
-                    json_str = json.dumps(data) + '\n' # Add newline separator
-                    # print(f"Sending to worker: {json_str.strip()}", file=sys.stderr) # Debug
-                    self.llm_worker_process.stdin.write(json_str)
+                    json_str = json.dumps(data)
+                    # print(f"Sending to worker: {json_str}", file=sys.stderr) # Debug
+                    self.llm_worker_process.stdin.write(json_str + '\n')
                     self.llm_worker_process.stdin.flush()
-                except (OSError, BrokenPipeError, ValueError) as e: # Added ValueError for closed file
-                    print(f"Error sending to LLM worker (Pipe closed or invalid state): {e}", file=sys.stderr)
-                    # Worker has likely crashed or exited. Stop tracking it.
-                    self._stop_llm_worker() # Attempt cleanup, might set self.llm_worker_process to None
-                    # Notify Emacs about the failure
-                    session = data.get("session", "unknown")
-                    eval_in_emacs("emigo--flush-buffer", session, f"[Error: Failed to send message to worker ({e})]", "error")
+                except (OSError, BrokenPipeError) as e:
+                    print(f"Error sending to LLM worker (Pipe probably closed): {e}", file=sys.stderr)
+                    # Worker might have crashed, try restarting on next send
+                    self._stop_llm_worker()
                 except Exception as e:
-                    print(f"Unexpected error sending to LLM worker: {e}", file=sys.stderr)
-                    # Also notify Emacs
-                    session = data.get("session", "unknown")
-                    eval_in_emacs("emigo--flush-buffer", session, f"[Error: Unexpected error sending message to worker ({e})]", "error")
-            elif not self.llm_worker_process: # Check if process is None
-                 print("Cannot send to worker, process is not running.", file=sys.stderr)
-                 # Notify Emacs
-                 session = data.get("session", "unknown")
-                 eval_in_emacs("emigo--flush-buffer", session, "[Error: LLM worker process is not running]", "error")
-            else: # Process exists but stdin might be closed
-                 print("Cannot send to worker, stdin not available or closed.", file=sys.stderr)
-                 # Notify Emacs
-                 session = data.get("session", "unknown")
-                 eval_in_emacs("emigo--flush-buffer", session, "[Error: Cannot write to LLM worker process]", "error")
+                    print(f"Error sending to LLM worker: {e}", file=sys.stderr)
+            else:
+                print("Cannot send to worker, stdin not available.", file=sys.stderr)
 
 
     def _process_worker_queue(self):
@@ -412,51 +380,37 @@ class Emigo:
                 # print(f"Processing worker message: {message}", file=sys.stderr) # Debug
 
                 if msg_type == "stream":
-                    role = message.get("role", "llm") # e.g., "llm", "user", "tool_json", "tool_json_args"
-                    content = message.get("content", "") # Default to empty string
-                    tool_id = message.get("tool_id") # Present for tool_json roles
-                    tool_name = message.get("tool_name") # Present for tool_json role
-
-                    # Filter content *unless* it's a tool argument chunk
-                    if role != "tool_json_args":
-                        filtered_content = _filter_environment_details(content)
-                    else:
-                        filtered_content = content # Pass tool args unfiltered
-
-                    # Flush to Emacs if content is non-empty OR if it's a tool start marker
-                    if filtered_content or role == "tool_json":
-                        # Pass all relevant info to Elisp
-                        eval_in_emacs("emigo--flush-buffer", session_path, filtered_content, role, tool_id, tool_name)
+                    role = message.get("role", "llm") # Default to llm role
+                    # Ensure content is never None, default to empty string, and filter it
+                    content = message.get("content") or ""
+                    filtered_content = _filter_environment_details(content)
+                    # Only flush if there's content *after* filtering
+                    if filtered_content:
+                        eval_in_emacs("emigo--flush-buffer", session_path, filtered_content, role)
                     # History is updated via the 'finished' message
 
                 elif msg_type == "tool_request":
-                    tool_call_id = message.get("request_id") # Worker sends tool_call_id as request_id
+                    request_id = message.get("request_id")
                     tool_name = message.get("tool_name")
-                    parameters_dict = message.get("parameters") # Expect 'parameters' dict
-
-                    if tool_call_id and tool_name and isinstance(parameters_dict, dict):
-                        # Store request data before executing, keyed by tool_call_id
-                        self.pending_tool_requests[tool_call_id] = message
-                        # Execute the tool (handles approval internally)
-                        tool_result_str = self._handle_tool_request_from_worker(session_path, tool_name, parameters_dict)
-                        # Send result back to worker, matching request_id (tool_call_id)
+                    params = message.get("params")
+                    if request_id and tool_name and params is not None:
+                        # Store request data before executing
+                        self.pending_tool_requests[request_id] = message
+                        # Execute the tool (this might block if sync Emacs calls are needed)
+                        # Run tool execution in a separate thread to avoid blocking queue processing?
+                        # For now, run directly. If Emacs calls block too long, reconsider.
+                        tool_result = self._handle_tool_request_from_worker(session_path, tool_name, params)
+                        # Send result back to worker
                         self._send_to_worker({
                             "type": "tool_result",
-                            "request_id": tool_call_id, # Use the tool_call_id received
-                            "result": tool_result_str # Send the actual result string
+                            "request_id": request_id,
+                            "result": tool_result # Send the actual result string
                         })
                         # Clean up pending request
-                        if tool_call_id in self.pending_tool_requests:
-                            del self.pending_tool_requests[tool_call_id]
+                        if request_id in self.pending_tool_requests:
+                            del self.pending_tool_requests[request_id]
                     else:
-                        print(f"Invalid tool_request from worker: {message}", file=sys.stderr)
-                        # Optionally send an error back to the worker?
-                        if tool_call_id:
-                             self._send_to_worker({
-                                 "type": "tool_result",
-                                 "request_id": tool_call_id,
-                                 "result": tools._format_tool_error("Invalid tool_request message received by main process.")
-                             })
+                        print(f"Invalid tool request from worker: {message}", file=sys.stderr)
 
                 elif msg_type == "finished":
                     status = message.get("status", "unknown")
@@ -525,59 +479,45 @@ class Emigo:
             except Exception as e:
                 print(f"Error processing worker queue message: {e}\n{traceback.format_exc()}", file=sys.stderr)
 
-    def _handle_tool_request_from_worker(self, session_path: str, tool_name: str, parameters: Dict[str, Any]) -> str:
-        """Handles tool execution requested by the worker process."""
-        print(f"Handling tool request from worker: {tool_name} for {session_path} with args: {parameters}", file=sys.stderr)
+    def _handle_tool_request_from_worker(self, session_path: str, tool_name: str, params: Dict[str, str]) -> str:
+        """Handles tool execution requested by the worker process by dispatching to tools.py."""
+        print(f"Handling tool request from worker: {tool_name} for {session_path}", file=sys.stderr)
 
         # Get the session object
         session = self._get_or_create_session(session_path)
         if not session:
-            return tools._format_tool_error(f"Could not find or create session for path: {session_path}")
-
-        # Get the tool definition from the registry
-        tool_definition = get_tool(tool_name)
-        if not tool_definition:
-            return tools._format_tool_error(f"Unknown tool requested: {tool_name}")
+            return tools._format_tool_error(f"Could not find or create session for path: {session_path}") # Use tool's formatter
 
         # Define tools that require explicit approval from Emacs
+        # Read, List, Search, ListRepomap are generally safe. Ask/Attempt interact directly.
+        # Read, List, Search are generally safe. Ask/Attempt interact directly.
+        # Replace approval might be handled within Elisp if needed, but let's require it here for safety.
         require_approval_list = [
             TOOL_EXECUTE_COMMAND,
             TOOL_WRITE_TO_FILE,
-            # Add other tools needing approval if necessary
         ]
 
         # --- Request Approval from Emacs (Synchronous) ---
         if tool_name in require_approval_list:
             try:
-                # Display parameters as JSON string for approval prompt
-                # Use ensure_ascii=False for better unicode display in Emacs if needed
-                args_display_str = json.dumps(parameters, indent=2, ensure_ascii=False)
-                print(f"Requesting approval for {tool_name} with args:\n{args_display_str}", file=sys.stderr)
-                # Pass the JSON string representation to Elisp
-                is_approved = get_emacs_func_result("request-tool-approval-sync", session_path, tool_name, args_display_str)
+                # Convert params dict to a plist string for Elisp
+                # Use json.dumps for robust value representation
+                params_plist_str = "(" + " ".join([f":{k} {json.dumps(v)}" for k, v in params.items()]) + ")"
+                print(f"Requesting approval for {tool_name} with params: {params_plist_str}", file=sys.stderr) # Debug
+                is_approved = get_emacs_func_result("request-tool-approval-sync", session_path, tool_name, params_plist_str)
 
                 if not is_approved: # Emacs function should return t or nil
                     print(f"Tool use denied by user: {tool_name}", file=sys.stderr)
+                    # Return the standard denial message for the worker to handle
                     return TOOL_DENIED
             except Exception as e:
                 print(f"Error requesting tool approval from Emacs: {e}\n{traceback.format_exc()}", file=sys.stderr)
-                # Use the tool's error formatter
-                return tools._format_tool_error(f"Error requesting tool approval: {e}")
-
-        # --- (Optional) Schema Validation ---
-        # Add validation logic here if desired, using jsonschema or Pydantic
-        # based on tool_definition['parameters']
+                return self._format_tool_error(f"Error requesting tool approval: {e}")
 
         # --- Execute Approved Tool ---
         print(f"Dispatching approved tool: {tool_name}", file=sys.stderr)
-        tool_function = tool_definition['function']
-        try:
-            # Pass the parameters dictionary directly to the tool function
-            tool_result = tool_function(session, parameters)
-        except Exception as e:
-            # Catch errors within the tool function itself
-            print(f"Error during execution of tool '{tool_name}': {e}\n{traceback.format_exc()}", file=sys.stderr)
-            return tools._format_tool_error(f"Error executing tool '{tool_name}': {e}")
+        # Call the dispatcher in tools.py, passing the session object
+        tool_result = tools.dispatch_tool(session, tool_name, params)
 
         # --- Clear Active Session on Completion ---
         # If the completion tool was called successfully, clear the active session flag *now*
