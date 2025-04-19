@@ -11,12 +11,14 @@ import os
 import sys
 import time
 import re
+import traceback
 import tiktoken
 from typing import List, Dict, Optional, Tuple
 
 from repomapper import RepoMapper
 from utils import (
-    eval_in_emacs, _filter_context, read_file_content, message_emacs
+    eval_in_emacs, _filter_context, read_file_content, message_emacs,
+    get_os_name # Import get_os_name if needed by moved functions (e.g., _build_system_prompt if moved here later)
 )
 
 
@@ -46,6 +48,20 @@ class Context:
 
         print(f"Initialized Context for path: {self.session_path}", file=sys.stderr)
 
+    # --- Token Counting (Moved from worker.py) ---
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens in text using the context's tokenizer or fallback."""
+        if not text:
+            return 0
+
+        if self.tokenizer:
+            try:
+                return len(self.tokenizer.encode(text))
+            except Exception as e:
+                print(f"Token counting error, using fallback: {e}", file=sys.stderr)
+        # Fallback: approximate tokens as 4 chars per token
+        return max(1, len(text) // 4)
+
     # --- History Management ---
 
     def get_history(self) -> List[Tuple[float, Dict]]:
@@ -62,8 +78,8 @@ class Context:
         # Ensure content is string before filtering
         if not isinstance(filtered_message.get("content"), str):
              filtered_message["content"] = str(filtered_message.get("content", ""))
-        filtered_message["content"] = _filter_context(filtered_message["content"])
-        self.history.append((time.time(), filtered_message)) # Store filtered copy
+        # No filtering here, filtering happens when sending/displaying if needed
+        self.history.append((time.time(), message))
 
     def clear_history(self):
         """Clears the chat history for this session."""
@@ -72,14 +88,103 @@ class Context:
 
     def set_history(self, history_dicts: List[Dict]):
         """Replaces the current history with the provided list of message dictionaries."""
-        self.history = [] # Clear existing history
-        for msg_dict in history_dicts:
+        new_history_tuples = []
+        current_time = time.time() # Use a consistent timestamp for the batch
+        for i, msg_dict in enumerate(history_dicts):
             if isinstance(msg_dict, dict) and "role" in msg_dict and "content" in msg_dict:
-                # Append using the standard method to ensure filtering and timestamping
-                self.append_history(msg_dict)
+                # Add with a slightly incrementing timestamp to maintain order if needed
+                new_history_tuples.append((current_time + i * 0.000001, msg_dict))
             else:
                 print(f"Warning: Skipping invalid message dict during set_history: {msg_dict}", file=sys.stderr)
+        self.history = new_history_tuples # Directly replace the history list
         print(f"Set history for context {self.session_path} with {len(self.history)} messages.", file=sys.stderr)
+
+    def add_interaction_to_history(self, user_message: Dict, assistant_message: Dict):
+        """Appends both the user and assistant messages from a completed interaction."""
+        self.append_history(user_message)
+        self.append_history(assistant_message)
+        print(f"Added interaction to history for {self.session_path}. New length: {len(self.history)}", file=sys.stderr)
+
+    def _truncate_history(self, history_tuples: List[Tuple[float, Dict]], max_tokens: int, min_messages: int) -> List[Tuple[float, Dict]]:
+        """
+        Truncate a list of history tuples to fit token limits.
+        """
+        original_length = len(history_tuples)
+        if not history_tuples:
+            return []
+
+        # Always keep the first message (system prompt or initial user message) if history exists
+        truncated_tuples = [history_tuples[0]] if history_tuples else []
+        current_tokens = self._count_tokens(truncated_tuples[0][1].get("content", "")) if truncated_tuples else 0
+
+        # Iterate through the rest of the history tuples from newest to oldest
+        for hist_tuple in reversed(history_tuples[1:]):
+            msg_content = hist_tuple[1].get("content", "")
+            msg_tokens = self._count_tokens(msg_content)
+
+            # Check if adding this message exceeds the token limit
+            if current_tokens + msg_tokens > max_tokens:
+                # If we already have the minimum required messages, stop here
+                if len(truncated_tuples) >= min_messages:
+                    break
+                # Otherwise, we must add it, even if it exceeds the limit slightly
+                # If we're below min messages, keep going but warn
+                print("Warning: History exceeds token limit but below min message count", file=sys.stderr)
+
+            truncated_tuples.insert(1, hist_tuple)  # Insert tuple after first message
+            current_tokens += msg_tokens
+
+        # If truncation occurred, update self.history
+        if len(truncated_tuples) < original_length:
+             print(f"History truncated from {original_length} to {len(truncated_tuples)} messages ({current_tokens} tokens). Updating context history.", file=sys.stderr)
+             self.history = truncated_tuples
+
+        # Return the list of truncated message tuples
+        return truncated_tuples
+
+    def get_truncated_history_dicts(self, max_tokens: int, min_messages: int, include_pending_user_prompt: Optional[Dict] = None) -> List[Dict]:
+        """
+        Returns a truncated list of message *dictionaries* based on current history
+        and an optional pending user prompt (used for calculation but not saved here).
+
+        Args:
+            max_tokens: The maximum number of tokens allowed for the history.
+            min_messages: The minimum number of messages to keep (including the first).
+            include_pending_user_prompt: A user prompt dict to temporarily include
+                                         for the truncation calculation.
+
+        Returns:
+            A list of message dictionaries representing the truncated history to be sent.
+        """
+        # Start with a copy of the current history tuples
+        history_with_pending = list(self.history)
+
+        # Temporarily add the pending user prompt for calculation if provided
+        pending_tuple = None
+        if include_pending_user_prompt:
+            pending_tuple = (time.time(), include_pending_user_prompt)
+            history_with_pending.append(pending_tuple)
+
+        # Call the internal truncation method on the list *including* the pending prompt.
+        # This call will now modify self.history if truncation occurs based on the combined length.
+        truncated_tuples_with_pending = self._truncate_history(history_with_pending, max_tokens, min_messages)
+
+        # --- Prepare the list of dictionaries to return ---
+        # Extract dictionaries from the *returned* truncated list (which might include the pending prompt)
+        truncated_dicts_to_send = [msg_dict for _, msg_dict in truncated_tuples_with_pending]
+
+        # Check if the pending prompt survived truncation (needed for removal below)
+        pending_survived = False
+        if pending_tuple and truncated_tuples_with_pending and truncated_tuples_with_pending[-1] == pending_tuple:
+            pending_survived = True
+
+        # If the pending prompt was included and survived truncation, remove its *dictionary*
+        # from the list we return to the caller (emigo.py), as the worker receives it separately.
+        if pending_survived and truncated_dicts_to_send and truncated_dicts_to_send[-1] == include_pending_user_prompt:
+             truncated_dicts_to_send.pop()
+
+        return truncated_dicts_to_send
+
 
     # --- Chat File Management ---
 

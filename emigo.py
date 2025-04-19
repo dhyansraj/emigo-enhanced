@@ -385,36 +385,23 @@ class Emigo:
                         self.active_interaction_session = None # Mark session as no longer active
                         print(f"Cleared active interaction flag for session: {session_path}", file=sys.stderr) # Debug
 
-                    # Append final assistant message to history here if needed
-                    # If the interaction finished successfully, update the session history
-                    if status in ["success", "max_turns_reached"]:
-                        final_history = message.get("final_history")
-                        if final_history and isinstance(final_history, list):
+                    # Update history only on success
+                    if status == "success":
+                        original_user_prompt = message.get("original_user_prompt")
+                        assistant_response = message.get("assistant_response")
+
+                        if original_user_prompt and assistant_response:
                             context = self._get_or_create_context(session_path)
                             if context:
-                                # Filter history content before setting it
-                                filtered_history = []
-                                for msg in final_history:
-                                    if isinstance(msg, dict) and "content" in msg:
-                                        filtered_msg = dict(msg) # Copy message
-                                        # Ensure content is string before filtering
-                                        if not isinstance(filtered_msg.get("content"), str):
-                                            filtered_msg["content"] = str(filtered_msg.get("content", ""))
-                                        filtered_msg["content"] = _filter_context(filtered_msg["content"])
-                                        filtered_history.append(filtered_msg)
-                                    else:
-                                        filtered_history.append(msg) # Keep non-dict or content-less items as is
-
-                                print(f"Updating session history for {session_path} with {len(filtered_history)} filtered messages.", file=sys.stderr)
-                                context.set_history(filtered_history) # Use the filtered history
+                                # Add the completed interaction to the history
+                                context.add_interaction_to_history(original_user_prompt, assistant_response)
                             else:
-                                print(f"Error: Could not find context {session_path} to update history.", file=sys.stderr) # Update error message
-                        elif status in ["success", "max_turns_reached"]: # Only warn if history was expected
-                            print(f"Warning: Worker finished successfully but did not provide final history for {session_path}.", file=sys.stderr) # DEBUG
+                                print(f"Error: Could not find context {session_path} to add interaction to history.", file=sys.stderr)
+                        else:
+                            print(f"Warning: Worker finished successfully but missing user prompt or assistant response for {session_path}.", file=sys.stderr)
 
-                    # Signal Emacs regardless of history update success
+                    # Signal Emacs that the agent is finished regardless of history update success
                     eval_in_emacs("emigo--agent-finished", session_path)
-                    # active_interaction_session is now cleared earlier
 
                 elif msg_type == "error":
                     error_msg = message.get("message", "Unknown error from worker")
@@ -497,40 +484,27 @@ class Emigo:
         # Call context method directly
         return context.get_chat_files()
 
-    def emigo_send(self, session_path: str, prompt: str, history_override: Optional[List[Dict]] = None):
+    def emigo_send(self, session_path: str, prompt: str):
         """
-        EPC: Handles a user prompt or revised history to initiate an LLM interaction.
+        EPC: Handles a user prompt to initiate an LLM interaction.
 
-        Gets the session, handles history override or appends the new prompt,
-        generates the context string (which also handles @file mentions),
-        retrieves necessary config, and sends the interaction request to the worker.
+        Gets the session, generates the context string (which also handles @file mentions),
+        retrieves necessary config, prepares history, and sends the interaction
+        request to the worker.
 
-        Args:
         Args:
             session_path: The path identifying the session.
-            prompt: The user's input prompt (used if history_override is None).
-            history_override: If provided, replaces the current session history via the Context.
+            prompt: The user's input prompt.
         """
         # --- Pre-Interaction Checks ---
-        if history_override:
-            print(f"Received revised history for session: {session_path}", file=sys.stderr) # DEBUG
-            if not isinstance(history_override, list):
-                 message_emacs(f"[Emigo Error] Received history_override is not a list: {type(history_override)}")
-                 return
-            # Assuming history_override is List[Dict] as sent from Elisp
-            history_dicts = history_override
-        else:
-            print(f"Received prompt for session: {session_path}: {prompt[:100]}...", file=sys.stderr) # DEBUG (limit prompt length)
+        print(f"Received prompt for session: {session_path}: {prompt[:100]}...", file=sys.stderr) # DEBUG (limit prompt length)
 
         # Check if another interaction is already running
         if self.active_interaction_session:
-            # DEBUG: Log which session is active
             print(f"DEBUG: Active interaction session is {self.active_interaction_session}", file=sys.stderr)
-            # Determine message based on whether it's a new prompt or revised history
-            action_desc = "re-run with the revised history" if history_override else "re-run with your new prompt"
+            action_desc = "re-run with your new prompt"
             print(f"Interaction already active for session {self.active_interaction_session}. Asking user about new request for {session_path}.", file=sys.stderr) # DEBUG
             try:
-                # Ask user in Emacs if they want to cancel the active session and proceed
                 confirm_cancel = get_emacs_func_result("yes-or-no-p",
                                                        f"LLM is currently running for '{self.active_interaction_session}', do you want to stop it and {action_desc}?")
 
@@ -540,11 +514,10 @@ class Emigo:
                     if not self.cancel_llm_interaction(self.active_interaction_session): # Check return value
                         message_emacs("[Emigo Error] Failed to cancel previous interaction.")
                         return # Stop if cancellation failed
-                    # Cancellation successful, self.active_interaction_session is now None
                     print(f"DEBUG: Active session should be None after successful cancellation: {self.active_interaction_session}", file=sys.stderr)
                 else:
                     # User declined, ignore the new request
-                    ignore_desc = "Revised history" if history_override else "New prompt"
+                    ignore_desc = "New prompt"
                     print(f"User declined cancellation. Ignoring {ignore_desc.lower()} for {session_path}.", file=sys.stderr) # DEBUG
                     eval_in_emacs("message", f"[Emigo] LLM busy with {self.active_interaction_session}. {ignore_desc} ignored.")
                     return # Stop processing the new request
@@ -568,27 +541,31 @@ class Emigo:
             self.active_interaction_session = None # Clear flag on error
             return
 
-        # --- History & Context Handling (Directly on Context) ---
-        if history_override:
-            # Replace the context's history
-            print(f"Replacing history for context {session_path}.", file=sys.stderr) # DEBUG
-            context.set_history(history_dicts)
-            # Optionally flush a marker to Emacs buffer?
-            eval_in_emacs("emigo--flush-buffer", context.session_path, "\n[History revised by user]\n", "info") # Example
-            # Generate context string *without* processing the placeholder prompt for mentions
-            context_str = context.generate_context_string(current_prompt=None)
-        else:
-            # Standard prompt: Flush to buffer and append to history
-            eval_in_emacs("emigo--flush-buffer", context.session_path, f"\n\nUser:\n{prompt}\n", "user")
-            context.append_history({"role": "user", "content": prompt})
-            # Generate context string *and* handle @file mentions in the prompt
-            print(f"Generating context string for {session_path}, processing prompt for mentions.", file=sys.stderr) # DEBUG
-            context_str = context.generate_context_string(current_prompt=prompt)
+        # --- History & Context Handling ---
+        # Standard prompt: Flush user prompt to Emacs buffer for display
+        eval_in_emacs("emigo--flush-buffer", context.session_path, f"\n\nUser:\n{prompt}\n", "user")
+        # DO NOT append to history here. History is appended after successful LLM response.
+
+        # Prepare user prompt dictionary
+        user_prompt_dict = {"role": "user", "content": prompt}
+
+        # Generate context string *and* handle @file mentions in the prompt
+        print(f"Generating context string for {session_path}, processing prompt for mentions.", file=sys.stderr) # DEBUG
+        context_str = context.generate_context_string(current_prompt=prompt)
 
         # --- Prepare data for worker ---
-        # Get current state snapshot from the Context
-        session_history = context.get_history()
-        session_chat_files = context.get_chat_files()
+        # Get TRUNCATED history *dictionaries* to send to the worker.
+        # Include the current user prompt temporarily for the truncation calculation.
+        max_history_tokens = 8000 # TODO: Make configurable
+        min_history_messages = 3  # TODO: Make configurable
+
+        # Calculate truncated history including the pending prompt
+        truncated_history_dicts_to_send = context.get_truncated_history_dicts(
+            max_history_tokens, min_history_messages, include_pending_user_prompt=user_prompt_dict
+        )
+
+        # Get other state snapshots
+        session_chat_files = context.get_chat_files() # Get current chat files
 
         # Get model config from Emacs vars
         vars_result = get_emacs_vars(["emigo-model", "emigo-base-url", "emigo-api-key"])
@@ -618,18 +595,13 @@ class Emigo:
             "verbose": context.verbose
         }
 
-        # Prepare the state snapshot for the worker
-        # Use the last message content from history as the nominal 'prompt' for the worker.
-        # This is important because the worker uses it for context/logging.
-        effective_prompt = session_history[-1][1].get("content", "") if session_history else prompt
-
         request_data = {
-            "session_path": context.session_path, # Use absolute path from context
-            "prompt": effective_prompt, # Use content of last message or original prompt
-            "history": session_history, # Pass current history snapshot (list of tuples)
+            "session_path": context.session_path,
+            "user_prompt": user_prompt_dict, # Send the original user prompt dict
+            "history": truncated_history_dicts_to_send, # Send the calculated truncated history dicts
             "config": worker_config,
-            "chat_files": session_chat_files, # Pass chat files snapshot
-            "context": context_str, # Pass generated context string
+            "chat_files": session_chat_files,
+            "context": context_str,
         }
 
         # --- Send request to worker ---
@@ -639,6 +611,45 @@ class Emigo:
             "data": request_data
         })
         # The response handling happens asynchronously in _process_worker_queue
+
+    def set_history_and_send(self, session_path: str, new_history_list: List[Dict], user_prompt_dict: Dict):
+        """
+        EPC: Sets the session history and then sends the provided user prompt.
+        Used after editing history in Emacs.
+
+        Args:
+            session_path: The path identifying the session.
+            new_history_list: The list of message dictionaries to set as the new history.
+            user_prompt_dict: The dictionary representing the final user message (the prompt).
+        """
+        print(f"Received set_history_and_send for session: {session_path}", file=sys.stderr) # DEBUG
+
+        # Validate input types
+        if not isinstance(new_history_list, list):
+            message_emacs(f"[Emigo Error] Invalid history format received: {type(new_history_list)}")
+            return
+        if not isinstance(user_prompt_dict, dict) or user_prompt_dict.get("role") != "user":
+            message_emacs(f"[Emigo Error] Invalid user prompt format received: {user_prompt_dict}")
+            return
+
+        # Get context
+        context = self._get_or_create_context(session_path)
+        if not context:
+            eval_in_emacs("emigo--flush-buffer", f"invalid-context-{session_path}", f"[Error: Invalid context path '{session_path}']", "error")
+            return
+
+        # Set the history in the context object
+        print(f"Setting history for context {session_path} with {len(new_history_list)} messages.", file=sys.stderr) # DEBUG
+        context.set_history(new_history_list)
+
+        # Extract the prompt string from the user prompt dictionary
+        prompt_string = user_prompt_dict.get("content", "")
+
+        # Call the standard emigo_send method to handle the interaction
+        # This avoids duplicating the interaction setup logic.
+        print(f"Calling emigo_send with extracted prompt for session {session_path}", file=sys.stderr) # DEBUG
+        self.emigo_send(session_path, prompt_string)
+
 
     def cancel_llm_interaction(self, session_path: str) -> bool:
         """
@@ -711,33 +722,15 @@ class Emigo:
         # --- End restart queue processor ---
 
         # --- Post-Cancellation State Updates ---
-        # Get the context object
         context = self.sessions.get(session_path)
-
-        # Remove the last user message (the cancelled prompt) from history via Context
         if context:
-            # History is stored as (timestamp, message_dict)
-            history = context.get_history() # Get current history
-            if history:
-                last_timestamp, last_message = history[-1]
-                if last_message.get("role") == "user":
-                    print(f"Removing cancelled user prompt from history for {session_path}", file=sys.stderr) # DEBUG
-                    # Create a new list excluding the last message
-                    new_history_dicts = [msg for ts, msg in history[:-1]]
-                    context.set_history(new_history_dicts) # Update history
-                else:
-                    print(f"Warning: Last message in history for cancelled context {session_path} was not from user.", file=sys.stderr) # DEBUG
-            else:
-                 print(f"DEBUG: History for context {session_path} was empty, nothing to remove.", file=sys.stderr)
-
-            # Invalidate the cache for the cancelled context to ensure fresh context next time
             print(f"Invalidating cache for cancelled context: {session_path}", file=sys.stderr) # DEBUG
             context.invalidate_cache()
         else:
-            print(f"Warning: Could not find context {session_path} to update history or invalidate cache after cancellation.", file=sys.stderr) # DEBUG
+            print(f"Warning: Could not find context {session_path} to invalidate cache after cancellation.", file=sys.stderr) # DEBUG
 
         # Clear active context state *after* all operations
-        print(f"DEBUG: Clearing active interaction context flag (was {self.active_interaction_session}).", file=sys.stderr)
+        print(f"DEBUG: Clearing active interaction context flag (was {self.active_interaction_session}).", file=sys.stderr) # DEBUG
         self.active_interaction_session = None
 
         # Notify Emacs buffer

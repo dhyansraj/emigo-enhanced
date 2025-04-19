@@ -12,42 +12,21 @@ import importlib
 import warnings
 from typing import List, Dict, Optional, Union, Iterator
 
-import tiktoken # For token counting
-
 # Filter out UserWarning from pydantic used by litellm
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 # Import necessary components
 from utils import _filter_context, get_os_name
+from llm import LLMClient # Import the LLMClient
 
 # Add project root to sys.path if not already present
 project_root = os.path.dirname(os.path.abspath(__file__))
-
-
-# --- Build System Prompt Function ---
-
-def _build_system_prompt(session_path: str, model_name: str) -> str:
-    """Builds the system prompt, inserting dynamic info."""
-    session_dir = session_path
-    os_name = get_os_name()
-    shell = "/bin/bash" # Default shell - TODO: Get from Emacs?
-    homedir = os.path.expanduser("~")
-
-    # Use .format() on the MAIN_SYSTEM_PROMPT template
-    prompt = MAIN_SYSTEM_PROMPT.format(
-        session_dir=session_dir.replace(os.sep, '/'), # Ensure POSIX paths
-        os_name=os_name,
-        shell=shell,
-        homedir=homedir.replace(os.sep, '/')
-    )
-    return prompt
-
 
 # --- System Prompt Template ---
 # Load from system_prompt.py or define here if simpler
 # Assuming it's defined here for simplicity based on previous context
 MAIN_SYSTEM_PROMPT = """You are Emigo, an expert software developer integrated into Emacs.
-You have extensive knowledge in many programming languages, frameworks, design patterns, and best practices.
+You have extensive knowledge in many programming languages, frameworks, design patterns, and everything in between.
 Always use best practices when coding. Respect and use existing conventions, libraries, etc that are already present in the code base.
 
 **Language Instruction**: You MUST detect the language of my question and respond in the same language. For example, if I ask a question in Chinese, you MUST reply in Chinese; if I ask in English, you MUST reply in English. This rule takes precedence over any other instructions. If you are unsure of the language, default to the language of the user's input.
@@ -94,248 +73,23 @@ You accomplish a given task by:
 3. Providing the complete response directly. Avoid conversational filler.
 """
 
-# --- Tool Formatting Removed ---
 
+# --- Build System Prompt Function ---
 
-# Configure basic litellm settings globally
-EMIGO_SITE_URL = "https://github.com/MatthewZMD/emigo"
-EMIGO_APP_NAME = "Emigo"
-os.environ["OR_SITE_URL"] = os.environ.get("OR_SITE_URL", EMIGO_SITE_URL)
-os.environ["OR_APP_NAME"] = os.environ.get("OR_APP_NAME", EMIGO_APP_NAME)
-os.environ["LITELLM_MODE"] = os.environ.get("LITELLM_MODE", "PRODUCTION")
+def _build_system_prompt(session_path: str, model_name: str) -> str:
+    """Builds the system prompt, inserting dynamic info."""
+    session_dir = session_path
+    os_name = get_os_name()
+    shell = "/bin/bash" # Default shell - TODO: Get from Emacs?
+    homedir = os.path.expanduser("~")
 
-VERBOSE_LLM_LOADING = False # Set to True for debugging litellm loading
-
-class LazyLiteLLM:
-    """Lazily loads the litellm library upon first access."""
-    _lazy_module = None
-
-    def __getattr__(self, name):
-        # Avoid infinite recursion during initialization
-        if name == "_lazy_module":
-            return super().__getattribute__(name)
-
-        self._load_litellm()
-        return getattr(self._lazy_module, name)
-
-    def _load_litellm(self):
-        """Loads and configures the litellm module."""
-        if self._lazy_module is not None:
-            return
-
-        if VERBOSE_LLM_LOADING:
-            print("Loading litellm...", file=sys.stderr)
-        start_time = time.time()
-
-        try:
-            self._lazy_module = importlib.import_module("litellm")
-
-            # Basic configuration similar to Aider
-            self._lazy_module.suppress_debug_info = True
-            self._lazy_module.set_verbose = False
-            self._lazy_module.drop_params = True # Drop unsupported params silently
-            # Attempt to disable internal debugging/logging if method exists
-            if hasattr(self._lazy_module, "_logging") and hasattr(
-                self._lazy_module._logging, "_disable_debugging"
-            ):
-                self._lazy_module._logging._disable_debugging()
-
-        except ImportError as e:
-            print(
-                f"Error: {e} litellm not found. Please install it: pip install litellm",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        except Exception as e:
-            print(f"Error loading litellm: {e}", file=sys.stderr)
-            sys.exit(1)
-
-        if VERBOSE_LLM_LOADING:
-            load_time = time.time() - start_time
-            print(f"Litellm loaded in {load_time:.2f} seconds.", file=sys.stderr)
-
-# Global instance of the lazy loader
-litellm = LazyLiteLLM()
-
-
-class LLMClient:
-    """Handles interaction with the LLM."""
-
-    def __init__(
-        self,
-        model_name: str,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        verbose: bool = False,
-    ):
-        """
-        Initializes the LLM client.
-
-        Args:
-            model_name: The name of the language model to use (e.g., "gpt-4o").
-            api_key: Optional API key for the LLM service.
-            base_url: Optional base URL for custom LLM endpoints (like Ollama).
-            verbose: If True, enables verbose output.
-        """
-        self.model_name = model_name
-        self.api_key = api_key
-        self.base_url = base_url
-        self.verbose = verbose
-        self.last_response_object = None # Store raw response object
-
-    def send(
-        self,
-        messages: List[Dict],
-        stream: bool = True,
-        temperature: float = 0.7,
-        # Removed tools and tool_choice parameters
-    ) -> Union[Iterator[object], object]: # Return type is iterator of chunks or full response object
-        """
-        Sends the provided messages list to the LLM and returns the response.
-
-        Args:
-            messages: The list of message dictionaries to send.
-            stream: Whether to stream the response or wait for the full completion.
-            temperature: The sampling temperature for the LLM.
-
-        Returns:
-            An iterator yielding response chunk objects if stream=True, otherwise the
-            full response object.
-        """
-        # Ensure litellm is loaded before making the call
-        litellm._load_litellm()
-
-        completion_kwargs = {
-            "model": self.model_name,
-            "messages": messages,
-            "stream": stream,
-            "temperature": temperature,
-        }
-
-        # Add API key and base URL if they were provided
-        if self.api_key:
-            completion_kwargs["api_key"] = self.api_key
-        if self.base_url:
-            completion_kwargs["base_url"] = self.base_url
-            # OLLAMA specific adjustment if needed (example)
-            if "ollama" in self.model_name or (self.base_url and "ollama" in self.base_url):
-                 # LiteLLM might handle this automatically, but explicitly setting can help
-                 completion_kwargs["model"] = self.model_name.replace("ollama/", "")
-
-        try:
-            # Store the raw response object for potential parsing later
-            self.last_response_object = None # Initialize
-
-            # Initiate the LLM call
-            response = litellm.completion(**completion_kwargs)
-            self.last_response_object = response # Store the raw response
-
-            # --- Verbose Logging ---
-            if self.verbose:
-                # Import json here if not already imported at the top level
-                import json
-                print("\n--- Sending to LLM ---", file=sys.stderr)
-                # Avoid printing potentially large base64 images in verbose mode
-                printable_messages = []
-                for msg in messages: # Use the 'messages' argument passed to send()
-                    if isinstance(msg.get("content"), list): # Handle image messages
-                        new_content = []
-                        for item in msg["content"]:
-                            if isinstance(item, dict) and item.get("type") == "image_url":
-                                # Truncate base64 data for printing
-                                 img_url = item.get("image_url", {}).get("url", "")
-                                 if isinstance(img_url, str) and img_url.startswith("data:"):
-                                     new_content.append({"type": "image_url", "image_url": {"url": img_url[:50] + "..."}})
-                                 else:
-                                     new_content.append(item) # Keep non-base64 or non-string URLs
-                            else:
-                                new_content.append(item)
-                        # Append the modified message with potentially truncated image data
-                        printable_messages.append({"role": msg["role"], "content": new_content})
-                    else:
-                        printable_messages.append(msg) # Append non-image messages as is
-
-                # Calculate approximate token count using litellm's utility
-                token_count_str = ""
-                try:
-                    # Ensure litellm is loaded before using its utilities
-                    litellm._load_litellm()
-                    # Use litellm's token counter if available
-                    count = litellm.token_counter(model=self.model_name, messages=messages)
-                    token_count_str = f" (estimated {count} tokens)"
-                except Exception as e:
-                     # Fallback or simple message if token counting fails
-                     token_count_str = f" (token count unavailable: {e})"
-
-
-                print(json.dumps(printable_messages, indent=2), file=sys.stderr)
-                print(f"--- End LLM Request{token_count_str} ---", file=sys.stderr)
-            # --- End Verbose Logging ---
-
-            if stream:
-                # Generator to yield the raw litellm chunk objects
-                def raw_chunk_stream():
-                    # Move the try/except block inside the generator
-                    try:
-                        # The 'response' variable is accessible due to closure
-                        for chunk in response:
-                            # print(f"Raw chunk: {chunk}") # DEBUG: Ensure this is commented out
-                            yield chunk # Yield the original chunk object
-                    except litellm.exceptions.APIConnectionError as e: # Catch specific error
-                        # Log the specific error clearly
-                        error_details = f"Caught APIConnectionError: {e}\n"
-                        if hasattr(e, 'response') and e.response:
-                            try:
-                                error_details += f"  Response Status: {getattr(e.response, 'status_code', 'N/A')}\n"
-                                response_text = getattr(e.response, 'text', '')
-                                error_details += f"  Response Content (first 500 chars): {response_text[:500]}{'...' if len(response_text) > 500 else ''}\n"
-                            except Exception as detail_err: error_details += f"  (Error getting response details: {detail_err})\n"
-                        if hasattr(e, 'request') and e.request:
-                             try:
-                                error_details += f"  Request URL: {getattr(e.request, 'url', 'N/A')}\n"
-                             except Exception as detail_err: error_details += f"  (Error getting request details: {detail_err})\n"
-                        print(f"\n[LLMClient Stream Error] {error_details}", file=sys.stderr)
-                        print("[LLMClient Stream Error] Stream may be incomplete.", file=sys.stderr)
-                        # Yield an error marker instead of just passing
-                        yield {"_stream_error": True, "error_message": str(e)}
-                    except Exception as e:
-                        # Catch other potential errors during streaming
-                        error_details = f"Caught unexpected error: {type(e).__name__} - {e}\n"
-                        if hasattr(e, 'response') and e.response:
-                            try:
-                                error_details += f"  Response Status: {getattr(e.response, 'status_code', 'N/A')}\n"
-                                response_text = getattr(e.response, 'text', '')
-                                error_details += f"  Response Content (first 500 chars): {response_text[:500]}{'...' if len(response_text) > 500 else ''}\n"
-                            except Exception as detail_err: error_details += f"  (Error getting response details: {detail_err})\n"
-                        if hasattr(e, 'request') and e.request:
-                             try:
-                                error_details += f"  Request URL: {getattr(e.request, 'url', 'N/A')}\n"
-                             except Exception as detail_err: error_details += f"  (Error getting request details: {detail_err})\n"
-                        # Include traceback for unexpected errors
-                        import traceback
-                        error_details += f"  Traceback:\n{traceback.format_exc()}\n"
-                        print(f"\n[LLMClient Stream Error] {error_details}", file=sys.stderr)
-                        # Yield an error marker
-                        yield {"_stream_error": True, "error_message": str(e)}
-
-                return raw_chunk_stream() # Return the generator yielding full chunks
-            else:
-                # For non-streaming, return the raw response object
-                return response # Return the whole LiteLLM response object
-
-        # Keep exception handling for non-streaming calls or errors *before* streaming starts
-        except litellm.APIConnectionError as e:
-             error_message = f"API Connection Error (pre-stream or non-stream): {e}"
-             print(f"\n{error_message}", file=sys.stderr)
-             # For non-streaming, return the error string
-             return f"[LLM Error: {error_message}]"
-        except Exception as e:
-             error_message = f"General Error (pre-stream or non-stream): {e}"
-             print(f"\n{error_message}", file=sys.stderr)
-             # For non-streaming, return the error string
-             return f"[LLM Error: {error_message}]"
-
-
+    # Use .format() on the MAIN_SYSTEM_PROMPT template
+    prompt = MAIN_SYSTEM_PROMPT.format(
+        session_dir=session_dir.replace(os.sep, '/'), # Ensure POSIX paths
+        os_name=os_name,
+        shell=shell,
+        homedir=homedir.replace(os.sep, '/')
+    )
 
 def send_message(msg_type, session_path, **kwargs):
     """Sends a JSON message to stdout for the main process."""
@@ -357,59 +111,17 @@ def send_message(msg_type, session_path, **kwargs):
         }), flush=True)
 
 
-
-def _count_tokens(text: str, tokenizer) -> int:
-    """Count tokens in text using tokenizer or fallback method."""
-    if not text:
-        return 0
-
-    if tokenizer:
-        try:
-            return len(tokenizer.encode(text))
-        except Exception as e:
-            print(f"Token counting error, using fallback: {e}", file=sys.stderr)
-
-    # Fallback: approximate tokens as 4 chars per token
-    return max(1, len(text) // 4)
-
-def _truncate_history(history: List[Dict[str, str]], max_tokens: int, min_messages: int, tokenizer) -> List[Dict[str, str]]:
-    """Truncate history to fit within token limits while preserving important messages."""
-    if not history:
-        return []
-
-    # Always keep first user message for context if history is not empty
-    truncated = [history[0]] if history else []
-    current_tokens = _count_tokens(truncated[0]["content"], tokenizer) if truncated else 0
-
-    # Add messages from newest to oldest until we hit the limit
-    for msg in reversed(history[1:]):
-        msg_tokens = _count_tokens(msg["content"], tokenizer)
-        if current_tokens + msg_tokens > max_tokens:
-            if len(truncated) >= min_messages:
-                break
-            # If we're below min messages, keep going but warn
-            print("Warning: History exceeds token limit but below min message count", file=sys.stderr)
-
-        truncated.insert(1, msg)  # Insert after first message
-        current_tokens += msg_tokens
-
-    if len(truncated) < len(history):
-        print(f"History truncated from {len(history)} to {len(truncated)} messages ({current_tokens} tokens)", file=sys.stderr)
-
-    return truncated
-
-
-def handle_interaction_request(request):
+def handle_interaction_request(request_data):
     """Handles a single interaction request dictionary."""
-    session_path = request.get("session_path")
-    prompt = request.get("prompt")
-    history = request.get("history", []) # List of (timestamp, message_dict)
-    config = request.get("config", {})
-    # chat_files_list = request.get("chat_files", []) # No longer needed directly
-    context_str = request.get("context", "<context>\n# Error: Details not provided by main process.\n</context>") # Get details from request
+    session_path = request_data.get("session_path")
+    user_prompt_dict = request_data.get("user_prompt") # The original user prompt dict
+    history = request_data.get("history", []) # List of message dicts (already truncated)
+    config = request_data.get("config", {})
+    # chat_files_list = request_data.get("chat_files", []) # Still available if needed
+    context_str = request_data.get("context", "<context>\n# Error: Details not provided by main process.\n</context>")
 
-    if not all([session_path, prompt]):
-        send_message("error", session_path or "unknown", message="Worker received incomplete request.")
+    if not all([session_path, user_prompt_dict, isinstance(history, list)]):
+        send_message("error", session_path or "unknown", message=f"Worker received incomplete request data: {request_data}")
         return
 
     # --- Initialize LLM Client ---
@@ -429,50 +141,27 @@ def handle_interaction_request(request):
         verbose=verbose,
     )
 
-    # --- History & Prompt Preparation ---
-    # Keep track of history *during* this interaction locally
-    interaction_history = [msg_dict for _, msg_dict in history] # Extract dicts
-
-    # History truncation settings
-    max_history_tokens = 8000  # Target max tokens for history
-    min_history_messages = 3   # Always keep at least this many messages
-    tokenizer = None
-    try:
-        tokenizer = tiktoken.get_encoding("cl100k_base")
-        tokenizer.encode("test") # Test it works
-    except Exception as e:
-        print(f"Warning: Could not initialize tokenizer. Using simple character count fallback. Error: {e}", file=sys.stderr)
-
     # --- Interaction Handling (Single Turn) ---
     llm_error_occurred = False # Flag for critical LLM errors
 
     try:
-        # 1. Build System Prompt (No tools)
+        # 1. Build System Prompt
         system_prompt = _build_system_prompt(session_path, llm_client.model_name)
 
-        # 2. Prepare Messages (Truncate history, add environment details)
+        # 2. Prepare messages for LLM
+        # Start with system prompt, add the received (truncated) history.
         messages_to_send = [{"role": "system", "content": system_prompt}]
-        truncated_history = _truncate_history(interaction_history, max_history_tokens, min_history_messages, tokenizer)
-        messages_to_send.extend(truncated_history)
+        messages_to_send.extend(history) # Add the truncated history
 
-        # Append environment details (passed in the request) to the last message
-        if messages_to_send:
-            # Use the context_str received in the request
-            last_message_copy = messages_to_send[-1].copy()
-            # Ensure content is a string before appending
-            if not isinstance(last_message_copy.get("content"), str):
-                last_message_copy["content"] = str(last_message_copy.get("content", "")) # Convert non-strings
-            last_message_copy["content"] += f"\n\n{context_str}"
-            messages_to_send[-1] = last_message_copy
-        else:
-            # Should not happen if history includes user prompt, but handle defensively
-            messages_to_send.append({"role": "user", "content": context_str})
+        # Create the final user message including the original prompt and the context string
+        final_user_content = user_prompt_dict.get("content", "") + f"\n\n{context_str}"
+        messages_to_send.append({"role": "user", "content": final_user_content})
 
         # 3. Call LLM
         full_response_text = "" # Accumulate the textual response
         turn_llm_error = False # Track error specifically for this LLM call
 
-        # Signal start of assistant response
+        # Signal start of assistant response stream
         send_message("stream", session_path, role="llm", content="\nAssistant:\n")
 
         try:
@@ -489,7 +178,7 @@ def handle_interaction_request(request):
                     error_message = f"[Error during LLM streaming: {chunk.get('error_message', 'Unknown stream error')}]"
                     print(f"\n{error_message}", file=sys.stderr)
                     send_message("stream", session_path, role="error", content=error_message)
-                    interaction_history.append({"role": "assistant", "content": error_message})
+                    # Don't modify history here, error status will be sent in 'finished'
                     break # Exit the stream processing loop
 
                 # Safely access delta
@@ -521,36 +210,28 @@ def handle_interaction_request(request):
             error_message = f"[Error during LLM communication: {e}]\n{traceback.format_exc()}"
             print(f"\n{error_message}", file=sys.stderr)
             send_message("stream", session_path, role="error", content=f"[LLM Error: {e}]")
-            interaction_history.append({"role": "assistant", "content": f"[LLM Error: {e}]"})
+            # Don't modify history here, error status will be sent in 'finished'
 
-        # Check if stream loop ended due to error
+        # --- Finalize Interaction ---
         if turn_llm_error:
-            print("Worker: Ending interaction due to detected LLM stream error.", file=sys.stderr)
-            # Error status will be set below
-
-        # Add Assistant Message to History
-        assistant_message = {"role": "assistant"}
-        filtered_response_text = _filter_context(full_response_text.strip())
-        if filtered_response_text:
-            assistant_message["content"] = filtered_response_text
-            interaction_history.append(assistant_message)
-        elif not turn_llm_error: # Add empty message only if no error and no content
-            interaction_history.append({"role": "assistant", "content": ""})
-
-        if llm_error_occurred:
             status = "llm_error"
             finish_message = "Interaction ended due to LLM communication error."
+            finish_data = {
+                "status": status,
+                "message": finish_message
+            }
         else: # Finished normally
             status = "success"
             finish_message = "Interaction completed."
-
-        finish_data = {
-            "status": status,
-            "message": finish_message
-        }
-        # Include final history state unless there was a critical LLM error
-        if status != "llm_error":
-            finish_data["final_history"] = interaction_history # Send back the list of dicts
+            # Prepare the assistant response dictionary
+            filtered_response_text = _filter_context(full_response_text.strip())
+            assistant_response_dict = {"role": "assistant", "content": filtered_response_text}
+            finish_data = {
+                "status": status,
+                "message": finish_message,
+                "original_user_prompt": user_prompt_dict, # Send back the original user prompt
+                "assistant_response": assistant_response_dict # Send back the assistant response
+            }
 
         send_message("finished", session_path, **finish_data)
 
@@ -575,11 +256,11 @@ def main():
                 # print(json.dumps({"type": "status", "status": "exiting", "reason": "stdin closed"}), flush=True)
                 break
 
-            request = json.loads(line)
-            if request.get("type") == "interaction_request":
-                handle_interaction_request(request.get("data"))
+            message = json.loads(line)
+            if message.get("type") == "interaction_request":
+                handle_interaction_request(message.get("data"))
             else:
-                print(f"Worker received unknown message type: {request.get('type')}", file=sys.stderr)
+                print(f"Worker received unknown message type: {message.get('type')}", file=sys.stderr)
 
         except json.JSONDecodeError:
             # Log error but try to continue reading

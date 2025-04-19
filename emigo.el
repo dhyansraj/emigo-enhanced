@@ -9,7 +9,7 @@
 ;; Copyright (C) 2025, Emigo, all rights reserved.
 ;; Created: 2025-03-29
 ;; Version: 0.5
-;; Last-Updated: Sat Apr 19 02:44:07 2025 (-0400)
+;; Last-Updated: Sat Apr 19 04:47:41 2025 (-0400)
 ;;           By: Mingde (Matthew) Zeng
 ;; Package-Requires: ((emacs "26.1") (transient "0.3.0") (compat "30.0.2.0") (markdown-mode "2.6"))
 ;; Keywords: ai emacs llm aider ai-pair-programming tools
@@ -949,19 +949,29 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
   (save-excursion
     (goto-char (point-min))
     (let ((history-list '()))
-      (while (re-search-forward "^\\* \\[.*\\] \\(.*?\\)\n#\\+BEGIN_SRC.*?\\n\\(\\(?:.\\|\n\\)*?\\)#\\+END_SRC" nil t)
+      (while (re-search-forward "^\\* \\[.*\\] \\(.*?\\)$" nil t)
         (let* ((role-str (downcase (match-string 1))) ;; user, assistant, tool, etc.
-               ;; Extract content *without* properties between BEGIN_SRC and END_SRC
-               (content-start (match-beginning 2))
-               (content-end (match-end 2))
-               ;; Ensure start/end are valid before extracting
-               (content (if (and content-start content-end)
+               (content-start (save-excursion
+                                (forward-line 1)
+                                (if (looking-at "#\\+BEGIN_SRC")
+                                    (progn
+                                      (forward-line 1)
+                                      (point))
+                                  (point))))
+               (content-end (save-excursion
+                              (goto-char content-start)
+                              (if (re-search-forward "#\\+END_SRC" nil t)
+                                  (match-beginning 0)
+                                (point-max))))
+               (content (if (and content-start content-end (> content-end content-start))
                             (buffer-substring-no-properties content-start content-end)
-                          ""))) ;; Default to empty string if match fails
-          ;; Construct the plist for this message, ensuring content is trimmed
+                          "")))
           (push `(:role ,role-str :content ,(string-trim content)) history-list)))
-      ;; Reverse the list to maintain original order
-      (nreverse history-list))))
+      (if (null history-list)
+          (progn
+            (message "[Emigo] No history entries found in buffer")
+            nil)
+        (nreverse history-list)))))
 
 (defun emigo--convert-plist-to-dict-list (plist-list)
   "Convert Elisp list of plists '((:key val ...)...) to list of maps for JSON."
@@ -990,15 +1000,25 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
     (if (null revised-history)
         (message "[Emigo] History buffer is empty or could not be parsed.")
       (progn
-        (message "[Emigo] Sending revised history to agent for session: %s" emigo-session-path)
-        ;; Convert the Elisp plist list to a list of maps (dicts) for Python
-        (let ((history-for-python (emigo--convert-plist-to-dict-list revised-history)))
-          ;; Call the refactored Python EPC method 'emigo_send'
-          ;; Pass session_path, a placeholder prompt, and the history_override
-          (emigo-call-async "emigo_send"
-                            emigo-session-path
-                            "[Revised History]" ;; Placeholder prompt
-                            history-for-python)) ;; Pass the converted history
+        ;; Validate: Check if the last message is from the user
+        (let* ((last-message-plist (car (last revised-history)))
+               (last-role (plist-get last-message-plist :role)))
+          (unless (equal last-role "user")
+            (error "[Emigo] The last entry in the history buffer must be a user prompt"))
+
+          ;; Split into history and the final user prompt
+          (let* ((new-history-plists (butlast revised-history))
+                 (user-prompt-plist last-message-plist)
+                 ;; Convert to JSON-compatible formats (list of maps, single map)
+                 (new-history-maps (emigo--convert-plist-to-dict-list new-history-plists))
+                 (user-prompt-map (car (emigo--convert-plist-to-dict-list (list user-prompt-plist))))) ;; Convert single plist
+
+            (message "[Emigo] Setting history and sending new prompt: %s" user-prompt-map)
+            ;; Call the new Python EPC method
+            (emigo-call-async "set_history_and_send"
+                              emigo-session-path
+                              new-history-maps
+                              user-prompt-map)))
 
         ;; Optionally switch back to the main emigo buffer automatically
         (let ((main-buffer-name (format "*emigo:%s*" emigo-session-path)))
