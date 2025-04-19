@@ -19,7 +19,7 @@ import os
 import sys
 import time
 import warnings
-from typing import Dict, Iterator, List, Optional, Union # Removed Tuple
+from typing import Dict, Iterator, List, Optional, Union
 
 # Filter out UserWarning from pydantic used by litellm
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
@@ -117,12 +117,9 @@ class LLMClient:
         messages: List[Dict],
         stream: bool = True,
         temperature: float = 0.7,
-        tools: Optional[List[Dict]] = None, # Add tools parameter
-        tool_choice: Optional[str] = "auto", # Add tool_choice parameter
-    ) -> Union[Iterator[str], object]: # Return type might be object for raw response
+    ) -> Union[Iterator[object], object]: # Return type is iterator of chunks or full response object
         """
-        Sends the provided messages list to the LLM, potentially with tool definitions,
-        and returns the response.
+        Sends the provided messages list to the LLM and returns the response.
 
         Args:
             messages: The list of message dictionaries to send.
@@ -142,11 +139,6 @@ class LLMClient:
             "stream": stream,
             "temperature": temperature,
         }
-        # Add tools and tool_choice if provided and not None/empty
-        if tools:
-            completion_kwargs["tools"] = tools
-        if tool_choice: # Only add if tool_choice is meaningful
-            completion_kwargs["tool_choice"] = tool_choice # e.g., "auto", "required", specific tool
 
         # Add API key and base URL if they were provided
         if self.api_key:
@@ -276,57 +268,3 @@ class LLMClient:
              print(f"\n{error_message}", file=sys.stderr)
              # For non-streaming, return the error string
              return f"[LLM Error: {error_message}]"
-
-
-# --- Example Usage (Optional) ---
-
-def main():
-    """Basic example demonstrating the LLMClient."""
-    # Configure from environment variables or defaults
-    model = os.getenv("EMIGO_MODEL", "gpt-4o-mini") # Example: use EMIGO_MODEL env var
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_API_BASE") # Or OLLAMA_HOST, etc.
-
-    if not api_key and not base_url:
-        print("Warning: No API key or base URL found. Using default litellm configuration.", file=sys.stderr)
-
-    client = LLMClient(model_name=model, api_key=api_key, base_url=base_url, verbose=True)
-
-    # Example messages list (history is managed externally)
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the capital of France?"}
-    ]
-    print(f"\nUser: {messages[-1]['content']}")
-
-    # Send the messages list (non-streaming)
-    print("\nAssistant (non-streaming):")
-    assistant_response = client.send(messages, stream=False)
-    print(assistant_response)
-
-    # Add assistant's response to the external history list
-    messages.append({"role": "assistant", "content": assistant_response})
-
-    # Add another user message
-    user_input_2 = "What about Spain?"
-    messages.append({"role": "user", "content": user_input_2})
-    print(f"\nUser: {user_input_2}")
-
-    # Send again (streaming)
-    print("\nAssistant (streaming):")
-    full_streamed_response = ""
-    response_stream = client.send(messages, stream=True)
-    for chunk in response_stream:
-        print(chunk, end="", flush=True)
-        full_streamed_response += chunk
-    print() # Newline after stream
-
-    # Add streamed response to the external history list
-    messages.append({"role": "assistant", "content": full_streamed_response})
-
-    print("\n--- Final Messages List ---")
-    print(json.dumps(messages, indent=2))
-
-
-if __name__ == "__main__":
-    main()

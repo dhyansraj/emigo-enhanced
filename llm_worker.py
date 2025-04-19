@@ -1,50 +1,341 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-LLM Interaction Worker Process.
-
-This script runs as a separate process managed by `emigo.py`. Its primary
-purpose is to isolate the potentially long-running and resource-intensive
-Large Language Model (LLM) interactions and agent logic from the main Emigo
-EPC server process.
-
-Key Responsibilities:
-- Listens for interaction requests (including prompt, history, config, context)
-  from `emigo.py` via stdin.
-- Initializes the `LLMClient` (from `llm.py`) and `Agent` (from `agent.py`)
-  for each interaction request.
-- Executes the main agentic loop: prepares prompts, calls the LLM, parses
-  responses for tool usage.
-- Streams LLM responses back to `emigo.py` via stdout.
-- Sends requests for tool execution back to `emigo.py` via stdout and waits
-  for results via stdin.
-- Sends requests for updated environment details (like file contents or
-  repository maps) back to `emigo.py` via stdout and waits for results via stdin.
-- Reports completion status or errors back to `emigo.py` via stdout.
-"""
+"""LLM Interaction Worker Process."""
 
 import sys
 import json
 import time
 import traceback
 import os
+import importlib
+import warnings
+from typing import List, Dict, Optional, Union, Iterator, Any # Add Any
 
-from utils import _filter_environment_details
-from llm import LLMClient
-from agent import Agent
-# Import tool definitions and provider formatting
-from tool_definitions import get_all_tools
-from llm_providers import get_formatted_tools
-# Import constants used for tool results
-from config import TOOL_DENIED, TOOL_ERROR_PREFIX
+import tiktoken # For token counting
 
-# Add project root to sys.path to allow importing other modules like llm, agent, utils
+# Filter out UserWarning from pydantic used by litellm
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
+# Import necessary components
+from utils import _filter_context, get_os_name
+
+# Add project root to sys.path if not already present
 project_root = os.path.dirname(os.path.abspath(__file__))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
 
-# --- Communication Functions ---
+
+# --- Build System Prompt Function ---
+
+def _build_system_prompt(session_path: str, model_name: str) -> str:
+    """Builds the system prompt, inserting dynamic info."""
+    session_dir = session_path
+    os_name = get_os_name()
+    shell = "/bin/bash" # Default shell - TODO: Get from Emacs?
+    homedir = os.path.expanduser("~")
+
+    # Use .format() on the MAIN_SYSTEM_PROMPT template
+    prompt = MAIN_SYSTEM_PROMPT.format(
+        session_dir=session_dir.replace(os.sep, '/'), # Ensure POSIX paths
+        os_name=os_name,
+        shell=shell,
+        homedir=homedir.replace(os.sep, '/')
+    )
+    return prompt
+
+
+# --- System Prompt Template ---
+# Load from system_prompt.py or define here if simpler
+# Assuming it's defined here for simplicity based on previous context
+MAIN_SYSTEM_PROMPT = """You are Emigo, an expert software developer integrated into Emacs.
+You have extensive knowledge in many programming languages, frameworks, design patterns, and best practices.
+Always use best practices when coding. Respect and use existing conventions, libraries, etc that are already present in the code base.
+
+**Language Instruction**: You MUST detect the language of my question and respond in the same language. For example, if I ask a question in Chinese, you MUST reply in Chinese; if I ask in English, you MUST reply in English. This rule takes precedence over any other instructions. If you are unsure of the language, default to the language of the user's input.
+
+====
+
+CAPABILITIES
+
+- You can write code, make edits or improvements to existing files, and understand the current state of a project.
+- When the user initially gives you a task, information about the project structure and files currently in the chat context will be included in `<context>`. Use this context to inform your actions.
+- You can use tools to interact with the system, read/write files, search, etc.
+
+====
+
+RULES
+
+- Your session directory is: {session_dir}
+- You cannot `cd` into a different directory. You operate from '{session_dir}'.
+- Do not use the ~ character or $HOME to refer to the home directory.
+- When making changes to code, always consider the context in which the code is being used. Ensure that your changes are compatible with the existing codebase and that they follow the project's coding standards and best practices.
+- The user may provide a file's contents directly in their message.
+- Your goal is to try to accomplish the user's task, NOT engage in a back and forth conversation.
+- You are STRICTLY FORBIDDEN from starting your messages with "Great", "Certainly", "Okay", "Sure". You should NOT be conversational in your responses, but rather direct and to the point. For example you should NOT say "Great, I've updated the CSS" but instead something like "I've updated the CSS". It is important you be clear and technical in your messages.
+- When presented with images, utilize your vision capabilities to thoroughly examine them and extract meaningful information. Incorporate these insights into your thought process as you accomplish the user's task.
+- At the end of each user message, you will automatically receive `<context>`. This information is not written by the user themselves, but is auto-generated to provide *passive context* about the project structure and the content of files currently added to the chat. Do not treat it as a direct part of the user's request unless they explicitly refer to it. Use this context to inform your actions. Explain your use of `<context>` clearly.
+- **Language Rule**: You MUST respond to my question in the same language I use to ask it. This is a strict requirement. For example, if I ask in Chinese, your response MUST be in Chinese. If you fail to detect the language, match the language of my input as closely as possible. This rule overrides any default language preferences.
+
+====
+
+SYSTEM INFORMATION
+
+Operating System: {os_name}
+Default Shell: {shell}
+Home Directory: {homedir}
+Session Directory: {session_dir}
+
+====
+
+OBJECTIVE
+
+You accomplish a given task by:
+1. Understanding the user's request and reviewing the `<context>` for context (file structure, cached file content).
+2. Generating code, explanations, or modifications based on the request and context.
+3. Providing the complete response directly. Avoid conversational filler.
+"""
+
+# --- Tool Formatting Removed ---
+
+
+# Configure basic litellm settings globally
+EMIGO_SITE_URL = "https://github.com/MatthewZMD/emigo"
+EMIGO_APP_NAME = "Emigo"
+os.environ["OR_SITE_URL"] = os.environ.get("OR_SITE_URL", EMIGO_SITE_URL)
+os.environ["OR_APP_NAME"] = os.environ.get("OR_APP_NAME", EMIGO_APP_NAME)
+os.environ["LITELLM_MODE"] = os.environ.get("LITELLM_MODE", "PRODUCTION")
+
+VERBOSE_LLM_LOADING = False # Set to True for debugging litellm loading
+
+class LazyLiteLLM:
+    """Lazily loads the litellm library upon first access."""
+    _lazy_module = None
+
+    def __getattr__(self, name):
+        # Avoid infinite recursion during initialization
+        if name == "_lazy_module":
+            return super().__getattribute__(name)
+
+        self._load_litellm()
+        return getattr(self._lazy_module, name)
+
+    def _load_litellm(self):
+        """Loads and configures the litellm module."""
+        if self._lazy_module is not None:
+            return
+
+        if VERBOSE_LLM_LOADING:
+            print("Loading litellm...", file=sys.stderr)
+        start_time = time.time()
+
+        try:
+            self._lazy_module = importlib.import_module("litellm")
+
+            # Basic configuration similar to Aider
+            self._lazy_module.suppress_debug_info = True
+            self._lazy_module.set_verbose = False
+            self._lazy_module.drop_params = True # Drop unsupported params silently
+            # Attempt to disable internal debugging/logging if method exists
+            if hasattr(self._lazy_module, "_logging") and hasattr(
+                self._lazy_module._logging, "_disable_debugging"
+            ):
+                self._lazy_module._logging._disable_debugging()
+
+        except ImportError as e:
+            print(
+                f"Error: {e} litellm not found. Please install it: pip install litellm",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error loading litellm: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if VERBOSE_LLM_LOADING:
+            load_time = time.time() - start_time
+            print(f"Litellm loaded in {load_time:.2f} seconds.", file=sys.stderr)
+
+# Global instance of the lazy loader
+litellm = LazyLiteLLM()
+
+
+class LLMClient:
+    """Handles interaction with the LLM."""
+
+    def __init__(
+        self,
+        model_name: str,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        verbose: bool = False,
+    ):
+        """
+        Initializes the LLM client.
+
+        Args:
+            model_name: The name of the language model to use (e.g., "gpt-4o").
+            api_key: Optional API key for the LLM service.
+            base_url: Optional base URL for custom LLM endpoints (like Ollama).
+            verbose: If True, enables verbose output.
+        """
+        self.model_name = model_name
+        self.api_key = api_key
+        self.base_url = base_url
+        self.verbose = verbose
+        self.last_response_object = None # Store raw response object
+
+    def send(
+        self,
+        messages: List[Dict],
+        stream: bool = True,
+        temperature: float = 0.7,
+        # Removed tools and tool_choice parameters
+    ) -> Union[Iterator[object], object]: # Return type is iterator of chunks or full response object
+        """
+        Sends the provided messages list to the LLM and returns the response.
+
+        Args:
+            messages: The list of message dictionaries to send.
+            stream: Whether to stream the response or wait for the full completion.
+            temperature: The sampling temperature for the LLM.
+
+        Returns:
+            An iterator yielding response chunk objects if stream=True, otherwise the
+            full response object.
+        """
+        # Ensure litellm is loaded before making the call
+        litellm._load_litellm()
+
+        completion_kwargs = {
+            "model": self.model_name,
+            "messages": messages,
+            "stream": stream,
+            "temperature": temperature,
+        }
+
+        # Add API key and base URL if they were provided
+        if self.api_key:
+            completion_kwargs["api_key"] = self.api_key
+        if self.base_url:
+            completion_kwargs["base_url"] = self.base_url
+            # OLLAMA specific adjustment if needed (example)
+            if "ollama" in self.model_name or (self.base_url and "ollama" in self.base_url):
+                 # LiteLLM might handle this automatically, but explicitly setting can help
+                 completion_kwargs["model"] = self.model_name.replace("ollama/", "")
+
+        try:
+            # Store the raw response object for potential parsing later
+            self.last_response_object = None # Initialize
+
+            # Initiate the LLM call
+            response = litellm.completion(**completion_kwargs)
+            self.last_response_object = response # Store the raw response
+
+            # --- Verbose Logging ---
+            if self.verbose:
+                # Import json here if not already imported at the top level
+                import json
+                print("\n--- Sending to LLM ---", file=sys.stderr)
+                # Avoid printing potentially large base64 images in verbose mode
+                printable_messages = []
+                for msg in messages: # Use the 'messages' argument passed to send()
+                    if isinstance(msg.get("content"), list): # Handle image messages
+                        new_content = []
+                        for item in msg["content"]:
+                            if isinstance(item, dict) and item.get("type") == "image_url":
+                                # Truncate base64 data for printing
+                                 img_url = item.get("image_url", {}).get("url", "")
+                                 if isinstance(img_url, str) and img_url.startswith("data:"):
+                                     new_content.append({"type": "image_url", "image_url": {"url": img_url[:50] + "..."}})
+                                 else:
+                                     new_content.append(item) # Keep non-base64 or non-string URLs
+                            else:
+                                new_content.append(item)
+                        # Append the modified message with potentially truncated image data
+                        printable_messages.append({"role": msg["role"], "content": new_content})
+                    else:
+                        printable_messages.append(msg) # Append non-image messages as is
+
+                # Calculate approximate token count using litellm's utility
+                token_count_str = ""
+                try:
+                    # Ensure litellm is loaded before using its utilities
+                    litellm._load_litellm()
+                    # Use litellm's token counter if available
+                    count = litellm.token_counter(model=self.model_name, messages=messages)
+                    token_count_str = f" (estimated {count} tokens)"
+                except Exception as e:
+                     # Fallback or simple message if token counting fails
+                     token_count_str = f" (token count unavailable: {e})"
+
+
+                print(json.dumps(printable_messages, indent=2), file=sys.stderr)
+                print(f"--- End LLM Request{token_count_str} ---", file=sys.stderr)
+            # --- End Verbose Logging ---
+
+            if stream:
+                # Generator to yield the raw litellm chunk objects
+                def raw_chunk_stream():
+                    # Move the try/except block inside the generator
+                    try:
+                        # The 'response' variable is accessible due to closure
+                        for chunk in response:
+                            # print(f"Raw chunk: {chunk}") # DEBUG: Ensure this is commented out
+                            yield chunk # Yield the original chunk object
+                    except litellm.exceptions.APIConnectionError as e: # Catch specific error
+                        # Log the specific error clearly
+                        error_details = f"Caught APIConnectionError: {e}\n"
+                        if hasattr(e, 'response') and e.response:
+                            try:
+                                error_details += f"  Response Status: {getattr(e.response, 'status_code', 'N/A')}\n"
+                                response_text = getattr(e.response, 'text', '')
+                                error_details += f"  Response Content (first 500 chars): {response_text[:500]}{'...' if len(response_text) > 500 else ''}\n"
+                            except Exception as detail_err: error_details += f"  (Error getting response details: {detail_err})\n"
+                        if hasattr(e, 'request') and e.request:
+                             try:
+                                error_details += f"  Request URL: {getattr(e.request, 'url', 'N/A')}\n"
+                             except Exception as detail_err: error_details += f"  (Error getting request details: {detail_err})\n"
+                        print(f"\n[LLMClient Stream Error] {error_details}", file=sys.stderr)
+                        print("[LLMClient Stream Error] Stream may be incomplete.", file=sys.stderr)
+                        # Yield an error marker instead of just passing
+                        yield {"_stream_error": True, "error_message": str(e)}
+                    except Exception as e:
+                        # Catch other potential errors during streaming
+                        error_details = f"Caught unexpected error: {type(e).__name__} - {e}\n"
+                        if hasattr(e, 'response') and e.response:
+                            try:
+                                error_details += f"  Response Status: {getattr(e.response, 'status_code', 'N/A')}\n"
+                                response_text = getattr(e.response, 'text', '')
+                                error_details += f"  Response Content (first 500 chars): {response_text[:500]}{'...' if len(response_text) > 500 else ''}\n"
+                            except Exception as detail_err: error_details += f"  (Error getting response details: {detail_err})\n"
+                        if hasattr(e, 'request') and e.request:
+                             try:
+                                error_details += f"  Request URL: {getattr(e.request, 'url', 'N/A')}\n"
+                             except Exception as detail_err: error_details += f"  (Error getting request details: {detail_err})\n"
+                        # Include traceback for unexpected errors
+                        import traceback
+                        error_details += f"  Traceback:\n{traceback.format_exc()}\n"
+                        print(f"\n[LLMClient Stream Error] {error_details}", file=sys.stderr)
+                        # Yield an error marker
+                        yield {"_stream_error": True, "error_message": str(e)}
+
+                return raw_chunk_stream() # Return the generator yielding full chunks
+            else:
+                # For non-streaming, return the raw response object
+                return response # Return the whole LiteLLM response object
+
+        # Keep exception handling for non-streaming calls or errors *before* streaming starts
+        except litellm.APIConnectionError as e:
+             error_message = f"API Connection Error (pre-stream or non-stream): {e}"
+             print(f"\n{error_message}", file=sys.stderr)
+             # For non-streaming, return the error string
+             return f"[LLM Error: {error_message}]"
+        except Exception as e:
+             error_message = f"General Error (pre-stream or non-stream): {e}"
+             print(f"\n{error_message}", file=sys.stderr)
+             # For non-streaming, return the error string
+             return f"[LLM Error: {error_message}]"
+
+
 
 def send_message(msg_type, session_path, **kwargs):
     """Sends a JSON message to stdout for the main process."""
@@ -66,31 +357,47 @@ def send_message(msg_type, session_path, **kwargs):
         }), flush=True)
 
 
-def request_tool_execution(session_path, tool_name, parameters_dict):
-    """Sends a tool request with structured parameters and waits for the result."""
-    request_id = f"tool_{time.time_ns()}" # Unique ID for the request
-    # Send the parameters as a dictionary
-    send_message("tool_request", session_path, request_id=request_id, tool_name=tool_name, parameters=parameters_dict)
-    # Wait for the corresponding tool_result from stdin
-    while True:
-        try:
-            line = sys.stdin.readline()
-            if not line:
-                # Main process likely closed stdin, worker should exit
-                send_message("error", session_path, message="Stdin closed unexpectedly. Exiting.")
-                sys.exit(1)
-            response = json.loads(line)
-            if response.get("type") == "tool_result" and response.get("request_id") == request_id:
-                return response.get("result")
-        except json.JSONDecodeError:
-            send_message("error", session_path, message=f"Worker received invalid JSON from stdin: {line.strip()}")
-            # Continue waiting, maybe the next line is valid
-        except Exception as e:
-            send_message("error", session_path, message=f"Error reading tool result from stdin: {e}")
-            # Return an error state to the agent logic
-            return f"<tool_error>Error receiving tool result: {e}</tool_error>"
 
-# --- Agent Logic Adaptation ---
+def _count_tokens(text: str, tokenizer) -> int:
+    """Count tokens in text using tokenizer or fallback method."""
+    if not text:
+        return 0
+
+    if tokenizer:
+        try:
+            return len(tokenizer.encode(text))
+        except Exception as e:
+            print(f"Token counting error, using fallback: {e}", file=sys.stderr)
+
+    # Fallback: approximate tokens as 4 chars per token
+    return max(1, len(text) // 4)
+
+def _truncate_history(history: List[Dict[str, str]], max_tokens: int, min_messages: int, tokenizer) -> List[Dict[str, str]]:
+    """Truncate history to fit within token limits while preserving important messages."""
+    if not history:
+        return []
+
+    # Always keep first user message for context if history is not empty
+    truncated = [history[0]] if history else []
+    current_tokens = _count_tokens(truncated[0]["content"], tokenizer) if truncated else 0
+
+    # Add messages from newest to oldest until we hit the limit
+    for msg in reversed(history[1:]):
+        msg_tokens = _count_tokens(msg["content"], tokenizer)
+        if current_tokens + msg_tokens > max_tokens:
+            if len(truncated) >= min_messages:
+                break
+            # If we're below min messages, keep going but warn
+            print("Warning: History exceeds token limit but below min message count", file=sys.stderr)
+
+        truncated.insert(1, msg)  # Insert after first message
+        current_tokens += msg_tokens
+
+    if len(truncated) < len(history):
+        print(f"History truncated from {len(history)} to {len(truncated)} messages ({current_tokens} tokens)", file=sys.stderr)
+
+    return truncated
+
 
 def handle_interaction_request(request):
     """Handles a single interaction request dictionary."""
@@ -98,15 +405,14 @@ def handle_interaction_request(request):
     prompt = request.get("prompt")
     history = request.get("history", []) # List of (timestamp, message_dict)
     config = request.get("config", {})
-    chat_files_list = request.get("chat_files", [])
-    environment_details_str = request.get("environment_details", "<environment_details>\n# Error: Details not provided by main process.\n</environment_details>") # Get details from request
+    # chat_files_list = request.get("chat_files", []) # No longer needed directly
+    context_str = request.get("context", "<context>\n# Error: Details not provided by main process.\n</context>") # Get details from request
 
     if not all([session_path, prompt]):
         send_message("error", session_path or "unknown", message="Worker received incomplete request.")
         return
 
     # --- Initialize LLM Client ---
-    # Get config from request data
     model_name = config.get("model")
     api_key = config.get("api_key")
     base_url = config.get("base_url")
@@ -122,396 +428,127 @@ def handle_interaction_request(request):
         base_url=base_url,
         verbose=verbose,
     )
-    # History is managed locally within this function now.
 
-    # --- Initialize Agent (or adapt its logic) ---
-    # Create a temporary chat_files dict for this request instance (still needed for Agent init?)
-    # Agent class might not need chat_files_ref anymore if env details are pre-built.
-    # Let's keep it for now in case Agent uses it for other things.
-    # The main process owns the canonical chat_files state
-    current_chat_files = {session_path: list(chat_files_list)}
-
-    # NOTE: This creates a new Agent instance for *every* request because
-    # the worker might be killed. If the worker were persistent, we might
-    # reuse instances.
-    # Environment details are fetched dynamically within the loop now.
-    agent = Agent(
-        session_path=session_path,
-        llm_client=llm_client,
-        chat_files_ref=current_chat_files, # Pass the temporary dict
-        verbose=verbose
-    )
-    # Set initial environment details (might be stale, but needed for first turn)
-    agent.environment_details_str = environment_details_str
-
-    # --- Adapt Agent Interaction Logic ---
-    # Implement a version of Agent.run_interaction that uses our communication functions
-
-    # Override the agent's communication methods to use our send_message function
-    def stream_to_main_process(content, role="llm"):
-        send_message("stream", session_path, role=role, content=content)
-
-    # Override the agent's tool execution to use our request_tool_execution function
-    def execute_tool_via_main_process(tool_name, params):
-        return request_tool_execution(session_path, tool_name, params)
-
-    # We don't need to patch tool execution on the agent side anymore,
-    # the worker will call request_tool_execution directly.
-    # We also don't need to patch the agent's LLM call method, the worker loop will handle it.
-
-    # --- Run the Agent Interaction Loop ---
+    # --- History & Prompt Preparation ---
     # Keep track of history *during* this interaction locally
-    # Start with a copy of the history received from the main process
     interaction_history = [msg_dict for _, msg_dict in history] # Extract dicts
 
+    # History truncation settings
+    max_history_tokens = 8000  # Target max tokens for history
+    min_history_messages = 3   # Always keep at least this many messages
+    tokenizer = None
     try:
-        # Build system prompt
-        system_prompt = agent._build_system_prompt()
+        tokenizer = tiktoken.get_encoding("cl100k_base")
+        tokenizer.encode("test") # Test it works
+    except Exception as e:
+        print(f"Warning: Could not initialize tokenizer. Using simple character count fallback. Error: {e}", file=sys.stderr)
 
-        # User prompt is already the last item in the history snapshot received
-        # No need to append it separately here.
+    # --- Interaction Handling (Single Turn) ---
+    llm_error_occurred = False # Flag for critical LLM errors
 
-        # Signal start of interaction
+    try:
+        # 1. Build System Prompt (No tools)
+        system_prompt = _build_system_prompt(session_path, llm_client.model_name)
+
+        # 2. Prepare Messages (Truncate history, add environment details)
+        messages_to_send = [{"role": "system", "content": system_prompt}]
+        truncated_history = _truncate_history(interaction_history, max_history_tokens, min_history_messages, tokenizer)
+        messages_to_send.extend(truncated_history)
+
+        # Append environment details (passed in the request) to the last message
+        if messages_to_send:
+            # Use the context_str received in the request
+            last_message_copy = messages_to_send[-1].copy()
+            # Ensure content is a string before appending
+            if not isinstance(last_message_copy.get("content"), str):
+                last_message_copy["content"] = str(last_message_copy.get("content", "")) # Convert non-strings
+            last_message_copy["content"] += f"\n\n{context_str}"
+            messages_to_send[-1] = last_message_copy
+        else:
+            # Should not happen if history includes user prompt, but handle defensively
+            messages_to_send.append({"role": "user", "content": context_str})
+
+        # 3. Call LLM
+        full_response_text = "" # Accumulate the textual response
+        turn_llm_error = False # Track error specifically for this LLM call
+
+        # Signal start of assistant response
         send_message("stream", session_path, role="llm", content="\nAssistant:\n")
 
-        max_turns = 10  # Limit turns to prevent infinite loops
-        for turn in range(max_turns):
-            print(f"Worker: Agent Turn {turn + 1}/{max_turns}", file=sys.stderr)
+        try:
+            # Prepare arguments for llm_client.send (no tools)
+            completion_args = {"stream": True}
+            response_stream = llm_client.send(messages_to_send, **completion_args)
 
-            # 1. Prepare Prompt (Pass the current state of the local interaction_history)
-            messages_to_send = agent._prepare_llm_prompt(system_prompt, interaction_history) # Pass the list of dicts
+            # Stream text chunks
+            for chunk in response_stream:
+                # Check for stream error marker
+                if isinstance(chunk, dict) and chunk.get("_stream_error"):
+                    turn_llm_error = True
+                    llm_error_occurred = True # Mark global error flag
+                    error_message = f"[Error during LLM streaming: {chunk.get('error_message', 'Unknown stream error')}]"
+                    print(f"\n{error_message}", file=sys.stderr)
+                    send_message("stream", session_path, role="error", content=error_message)
+                    interaction_history.append({"role": "assistant", "content": error_message})
+                    break # Exit the stream processing loop
 
-            # 2. Call LLM (directly using llm_client)
-            full_response_text = "" # Accumulate the textual response
-            tool_call_fragments = {} # {index: {"id": str, "type": str, "function": {"name": str, "arguments": str}}}
-            started_tool_calls = set() # Keep track of tool_ids for which 'tool_json' has been sent
-            llm_error_occurred = False # Flag to track LLM errors
+                # Safely access delta
+                delta = None
+                try:
+                    if chunk and hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
+                         if hasattr(chunk.choices[0], 'delta'):
+                             delta = chunk.choices[0].delta
+                except Exception as e:
+                    print(f"  - Error accessing chunk delta: {e}. Chunk: {chunk}", file=sys.stderr)
+                    continue
 
-            try:
-                # Get available tools and format them for the provider
-                available_tools = get_all_tools() # From tool_definitions
-                formatted_tools = get_formatted_tools(available_tools, llm_client.model_name) # From llm_providers
+                if not delta: continue # Skip chunk if no delta
 
-                # Prepare arguments for llm_client.send
-                completion_args = {"stream": True}
-                if formatted_tools:
-                    completion_args["tools"] = formatted_tools
-                    completion_args["tool_choice"] = "auto" # Or make configurable if needed
+                # Process text content
+                try:
+                    if hasattr(delta, 'content') and delta.content:
+                        content_piece = delta.content
+                        send_message("stream", session_path, role="llm", content=content_piece)
+                        full_response_text += content_piece
+                except Exception as e:
+                     print(f"  - Error processing delta.content: {e}. Delta: {delta}", file=sys.stderr)
 
-                # Call llm_client directly, enabling streaming and passing tools
-                response_stream = llm_client.send(messages_to_send, **completion_args)
+                # Tool call processing removed
 
-                # Stream text chunks and accumulate tool calls
-                for chunk in response_stream:
-                    # --- Check for stream error marker ---
-                    if isinstance(chunk, dict) and chunk.get("_stream_error"):
-                        llm_error_occurred = True
-                        error_message = f"[Error during LLM streaming: {chunk.get('error_message', 'Unknown stream error')}]"
-                        print(f"\n{error_message}", file=sys.stderr) # Print detailed error
-                        stream_to_main_process(error_message, "error") # Send simplified error
-                        # Add error to local history for this interaction attempt
-                        interaction_history.append({"role": "assistant", "content": error_message})
-                        break # Exit the stream processing loop
+        except Exception as e:
+            turn_llm_error = True
+            llm_error_occurred = True # Mark global error flag
+            error_message = f"[Error during LLM communication: {e}]\n{traceback.format_exc()}"
+            print(f"\n{error_message}", file=sys.stderr)
+            send_message("stream", session_path, role="error", content=f"[LLM Error: {e}]")
+            interaction_history.append({"role": "assistant", "content": f"[LLM Error: {e}]"})
 
-                    # --- Safely access delta ---
-                    delta = None
-                    try:
-                        # Ensure chunk is not the error marker before accessing choices/delta
-                        if chunk and not isinstance(chunk, dict) and hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
-                             # Access delta safely
-                             if hasattr(chunk.choices[0], 'delta'):
-                                 delta = chunk.choices[0].delta
-                             else:
-                                 # print(f"  - Skipping chunk choice missing 'delta': {chunk.choices[0]}", file=sys.stderr)
-                                 continue # Skip choice if delta is missing
-                        else:
-                            # Log unexpected chunk structure if needed, but don't stop
-                            # print(f"  - Skipping chunk with unexpected structure: {chunk}", file=sys.stderr)
-                            continue # Skip to next chunk
-                    except AttributeError as e:
-                        print(f"  - Error accessing chunk attributes: {e}. Chunk: {chunk}", file=sys.stderr)
-                        continue # Skip malformed chunk
-                    except Exception as e: # Catch other potential errors during access
-                        print(f"  - Unexpected error accessing chunk delta: {e}. Chunk: {chunk}", file=sys.stderr)
-                        continue
+        # Check if stream loop ended due to error
+        if turn_llm_error:
+            print("Worker: Ending interaction due to detected LLM stream error.", file=sys.stderr)
+            # Error status will be set below
 
-                    if not delta:
-                        # print(f"  - Skipping chunk with no delta: {chunk}", file=sys.stderr)
-                        continue # Skip chunk if delta couldn't be accessed
+        # Add Assistant Message to History
+        assistant_message = {"role": "assistant"}
+        filtered_response_text = _filter_context(full_response_text.strip())
+        if filtered_response_text:
+            assistant_message["content"] = filtered_response_text
+            interaction_history.append(assistant_message)
+        elif not turn_llm_error: # Add empty message only if no error and no content
+            interaction_history.append({"role": "assistant", "content": ""})
 
-                    # --- Process text content ---
-                    try:
-                        if hasattr(delta, 'content') and delta.content:
-                            content_piece = delta.content
-                            stream_to_main_process(content_piece) # Stream text content
-                            full_response_text += content_piece # Accumulate text
-                    except Exception as e:
-                         print(f"  - Error processing delta.content: {e}. Delta: {delta}", file=sys.stderr)
-                         # Continue processing other parts if possible
-
-                    # --- Process tool calls ---
-                    try:
-                        if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                            for call_chunk in delta.tool_calls:
-                                # --- Safely access tool call chunk attributes ---
-                                index = getattr(call_chunk, 'index', None)
-                                if index is None:
-                                    print(f"  - Skipping tool call chunk missing 'index': {call_chunk}", file=sys.stderr)
-                                    continue
-
-                                # --- Initialize fragment if new ---
-                                if index not in tool_call_fragments:
-                                    tool_id = getattr(call_chunk, 'id', None)
-                                    tool_type = getattr(call_chunk, 'type', 'function') # Default type
-                                    # Safely access function name
-                                    function_obj = getattr(call_chunk, 'function', None)
-                                    func_name = getattr(function_obj, 'name', None) if function_obj else None
-
-                                    if tool_id and func_name: # Require id and function name to initialize
-                                        tool_call_fragments[index] = {
-                                            "id": tool_id,
-                                            "type": tool_type,
-                                            "function": {"name": func_name, "arguments": ""}
-                                        }
-                                        print(f"  - Started tool call fragment {index}: id={tool_id}, name={func_name}", file=sys.stderr)
-                                        # --- Send Start of JSON Structure ---
-                                        # Send tool_name explicitly in the message payload, content is now just a marker/empty
-                                        send_message("stream", session_path, role="tool_json",
-                                                     content="", tool_id=tool_id, tool_name=func_name) # Send empty content
-                                    else:
-                                        print(f"  - Skipping incomplete tool call chunk (missing id or func name): {call_chunk}", file=sys.stderr)
-                                        continue # Skip if essential init info is missing
-
-                                # --- Append and Stream Argument Chunks ---
-                                # Check if fragment was successfully initialized before appending args
-                                if index in tool_call_fragments:
-                                    # Safely access arguments
-                                    function_obj = getattr(call_chunk, 'function', None)
-                                    arguments_chunk = getattr(function_obj, 'arguments', None) if function_obj else None
-                                    if arguments_chunk:
-                                        # Append to internal fragment storage (still needed for final parsing/history)
-                                        tool_call_fragments[index]["function"]["arguments"] += arguments_chunk
-                                        # --- Stream Argument Chunk ---
-                                        send_message("stream", session_path, role="tool_json_args", content=arguments_chunk, tool_id=tool_call_fragments[index]["id"])
-                                        # print(f"  - Streamed args chunk for fragment {index}: {arguments_chunk}", file=sys.stderr) # Verbose
-                    except Exception as e:
-                         print(f"  - Error processing delta.tool_calls: {e}. Delta: {delta}", file=sys.stderr)
-                         # Continue processing other parts if possible
-
-            except Exception as e:
-                llm_error_occurred = True # Set flag
-                error_message = f"[Error during LLM communication or streaming: {e}]\n{traceback.format_exc()}"
-                print(f"\n{error_message}", file=sys.stderr) # Print detailed error
-                stream_to_main_process(f"[LLM Error: {e}]", "error") # Send simplified error
-                # Add error to local history for this interaction attempt
-                interaction_history.append({"role": "assistant", "content": f"[LLM Error: {e}]"})
-                # No 'break' here, let it proceed to 'finished' message
-
-            # --- Check if stream loop ended due to error ---
-            if llm_error_occurred:
-                print("Worker: Breaking outer turn loop due to detected LLM stream error.", file=sys.stderr)
-                break # Exit the 'for turn...' loop immediately
-
-            # 3. Process Response (Parse Tool Calls from accumulated fragments)
-            tool_calls_extracted = [] # List of (tool_call_id, tool_name, parameters_dict)
-            reconstructed_tool_calls = [] # List of {id:.., type:.., function:{name:.., arguments:...}} for history
-
-            if not llm_error_occurred and tool_call_fragments: # Only process tools if no LLM error
-                print(f"Worker: Processing {len(tool_call_fragments)} accumulated tool call fragments.", file=sys.stderr)
-                # Sort fragments by index to process in order
-                sorted_indices = sorted(tool_call_fragments.keys())
-
-                for index in sorted_indices:
-                    fragment = tool_call_fragments[index]
-                    tool_call_id = fragment.get("id")
-                    tool_type = fragment.get("type", "function") # Usually 'function'
-                    func_name = fragment.get("function", {}).get("name")
-                    arguments_str = fragment.get("function", {}).get("arguments", "")
-
-                    if not all([tool_call_id, func_name]):
-                        print(f"  - Warning: Skipping incomplete tool call fragment at index {index}: {fragment}", file=sys.stderr)
-                        continue
-
-                    # Add the fully reconstructed tool call to the list for history
-                    reconstructed_tool_calls.append({
-                        "id": tool_call_id,
-                        "type": tool_type,
-                        "function": {"name": func_name, "arguments": arguments_str}
-                    })
-
-                    # Try parsing arguments for execution
-                    try:
-                        stripped_args = arguments_str.strip()
-                        if not stripped_args:
-                            parameters = {} # Treat empty args as an empty dict
-                        else:
-                            parameters = json.loads(stripped_args) # Parse non-empty args
-
-                        if isinstance(parameters, dict):
-                            tool_call_tuple = (tool_call_id, func_name, parameters)
-                            tool_calls_extracted.append(tool_call_tuple)
-                            print(f"  - Parsed tool call {index}: {func_name}({parameters}) (ID: {tool_call_id})", file=sys.stderr)
-                            # --- JSON streaming is handled during the chunk processing loop ---
-                            # (Keep the parsing logic here to prepare for execution)
-                        else:
-                            print(f"  - Error: Arguments for tool {func_name} (Index {index}) is not a JSON object: {arguments_str}", file=sys.stderr)
-                            # Don't add to tool_calls_extracted if params are invalid
-                    except json.JSONDecodeError as json_decode_err:
-                        print(f"  - Error: Failed to decode JSON arguments for tool {func_name} (Index {index}). Error: {json_decode_err}. Arguments received:\n{arguments_str}", file=sys.stderr)
-                        # Don't add to tool_calls_extracted if params are invalid
-                    except Exception as parse_err:
-                        print(f"  - Error: Unexpected error parsing arguments for tool {func_name} (Index {index}): {parse_err}", file=sys.stderr)
-                        # Don't add to tool_calls_extracted on other errors
-
-            # --- Log incomplete fragments if stream error occurred ---
-            if llm_error_occurred and tool_call_fragments:
-                parsed_ids = {call["id"] for call in reconstructed_tool_calls}
-                incomplete_fragments = []
-                for index, fragment in tool_call_fragments.items():
-                    frag_id = fragment.get("id")
-                    if frag_id and frag_id not in parsed_ids:
-                        incomplete_fragments.append(f"Index {index} (ID: {frag_id}, Name: {fragment.get('function', {}).get('name')})")
-                if incomplete_fragments:
-                    print(f"Worker: Detected incomplete tool call fragments likely due to stream error: {', '.join(incomplete_fragments)}", file=sys.stderr)
-
-            # Add the assistant message to history *before* executing tools
-            # Include reconstructed tool calls if any were generated
-            if not llm_error_occurred:
-                assistant_message = {"role": "assistant"}
-                filtered_response_text = _filter_environment_details(full_response_text.strip())
-                # Add content only if it's non-empty after filtering
-                if filtered_response_text:
-                    assistant_message["content"] = filtered_response_text
-                else:
-                    # Per OpenAI spec, content is null if only tool_calls are present
-                    assistant_message["content"] = None # Explicitly null
-
-                # Add tool_calls structure if tools were generated
-                if reconstructed_tool_calls:
-                    assistant_message["tool_calls"] = reconstructed_tool_calls
-
-                # Add message to history only if it has content OR tool calls
-                if assistant_message.get("content") or assistant_message.get("tool_calls"):
-                    interaction_history.append(assistant_message)
-                elif not tool_call_fragments: # If no text AND no tool fragments, add empty assistant message (content="")
-                     interaction_history.append({"role": "assistant", "content": ""})
-
-
-            # 4. Execute Tools (if any calls were successfully *parsed* and no LLM error)
-            should_continue_interaction = True # Assume continuation unless tool signals otherwise
-            # Add logging before the check
-            print(f"Worker: Checking tool execution. LLM Error: {llm_error_occurred}. Parsed Tool Calls: {len(tool_calls_extracted)}. Reconstructed Tool Calls: {len(reconstructed_tool_calls)}", file=sys.stderr)
-
-            if not llm_error_occurred and tool_calls_extracted:
-                tool_results_for_history = [] # Store results for history (role='tool')
-
-                for tool_call_id, tool_name, parameters_dict in tool_calls_extracted:
-                    print(f"Worker: Requesting execution for tool: {tool_name} (ID: {tool_call_id})", file=sys.stderr)
-                    # Pass the already parsed dictionary
-                    tool_result_str = request_tool_execution(session_path, tool_name, parameters_dict)
-
-                    # --- Check raw tool_result_str for signals BEFORE filtering ---
-                    if tool_result_str == "COMPLETION_SIGNALLED":
-                        print(f"Worker: Completion signalled by tool {tool_name}. Ending interaction.", file=sys.stderr)
-                        should_continue_interaction = False
-                        # Add the signalling result to history before breaking
-                        tool_results_for_history.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "name": tool_name,
-                            "content": tool_result_str
-                        })
-                        break # Stop processing further tools
-                    elif tool_result_str == TOOL_DENIED: # Use constant
-                        print(f"Worker: Tool {tool_name} denied by user. Ending interaction.", file=sys.stderr)
-                        should_continue_interaction = False
-                        # Add the denial result to history before breaking
-                        tool_results_for_history.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "name": tool_name,
-                            "content": tool_result_str
-                        })
-                        break # Stop processing further tools
-                    elif tool_result_str.startswith(TOOL_ERROR_PREFIX): # Use constant
-                        print(f"Worker: Tool {tool_name} failed. Ending interaction. Result: {tool_result_str}", file=sys.stderr)
-                        should_continue_interaction = False
-                         # Add the error result to history before breaking
-                        tool_results_for_history.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "name": tool_name,
-                            "content": tool_result_str
-                        })
-                        break # Stop processing further tools
-
-                    # --- If no signal, filter and prepare result for history ---
-                    filtered_tool_result = _filter_environment_details(tool_result_str)
-                    tool_results_for_history.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "name": tool_name,
-                        "content": filtered_tool_result
-                    })
-
-                # 5. Add Tool Results to History (potentially including signal messages)
-                if tool_results_for_history:
-                    interaction_history.extend(tool_results_for_history)
-
-                # 6. Check if loop should break based on tool results
-                if not should_continue_interaction:
-                    print("Worker: Ending interaction loop due to tool result (completion, denial, error).", file=sys.stderr)
-                    break # Exit the turn loop
-
-                # 7. Fetch updated environment details ONLY if continuing
-                if should_continue_interaction: # Check flag before fetching
-                    print("Worker: Requesting updated environment details for next turn...", file=sys.stderr)
-                    updated_env_details = request_environment_details(session_path)
-                    agent.environment_details_str = updated_env_details # Update agent's state
-                    print("Worker: Updated environment details received.", file=sys.stderr)
-
-            # Check if interaction should end because no *parsed* tools were called
-            # or if an LLM error occurred.
-            elif not llm_error_occurred and not tool_calls_extracted:
-                # This condition is met if:
-                # - LLM produced no tool_call fragments OR
-                # - LLM produced fragments, but they failed parsing (JSON error, etc.)
-                print("Worker: No valid tool calls parsed or executed in this turn, ending interaction.", file=sys.stderr)
-                break # Exit the turn loop
-            elif llm_error_occurred: # LLM error occurred
-                print("Worker: Ending interaction loop due to LLM communication error.", file=sys.stderr)
-                break # Exit loop
-
-
-        # --- End of Turn Loop ---
-
-        # --- Send End of JSON Structure for each tool call ---
-        if tool_call_fragments:
-            print(f"Worker: Sending end markers for {len(tool_call_fragments)} tool calls.", file=sys.stderr)
-            for index in sorted(tool_call_fragments.keys()):
-                fragment = tool_call_fragments[index]
-                tool_id = fragment.get("id")
-                if tool_id:
-                    # Send an empty content marker for the end
-                    send_message("stream", session_path, role="tool_json_end", content="", tool_id=tool_id) # Send empty content
-
-        # Signal interaction finished
-        # Determine status based on whether an LLM error occurred or max turns were reached
         if llm_error_occurred:
             status = "llm_error"
             finish_message = "Interaction ended due to LLM communication error."
-        elif turn >= max_turns - 1: # Check if loop finished due to max_turns
-            status = "max_turns_reached"
-            finish_message = f"Interaction ended after reaching max {max_turns} turns."
-        else: # Loop finished normally (no tool calls, completion, denial, or tool error)
+        else: # Finished normally
             status = "success"
-            finish_message = f"Interaction ended after {turn + 1} turns."
+            finish_message = "Interaction completed."
 
         finish_data = {
             "status": status,
             "message": finish_message
         }
-        # Include the final history state unless there was an LLM error
+        # Include final history state unless there was a critical LLM error
         if status != "llm_error":
             finish_data["final_history"] = interaction_history # Send back the list of dicts
 
@@ -519,16 +556,11 @@ def handle_interaction_request(request):
 
     except Exception as e:
         tb_str = traceback.format_exc()
-        error_msg = f"Critical error in agent interaction loop: {e}\n{tb_str}"
+        error_msg = f"Critical error in interaction handler: {e}\n{tb_str}"
         print(error_msg, file=sys.stderr)
-        # Ensure session_path is valid before sending messages
         valid_session_path = session_path or "unknown_session"
-        # Use send_message for consistency
-        send_message("stream", valid_session_path, role="error", content=f"[Agent Critical Error: {e}]")
+        send_message("stream", valid_session_path, role="error", content=f"[Worker Critical Error: {e}]")
         send_message("finished", valid_session_path, status="critical_error", message=error_msg)
-
-
-# --- Main Worker Loop ---
 
 def main():
     """Reads requests from stdin and handles them."""
@@ -546,41 +578,25 @@ def main():
             request = json.loads(line)
             if request.get("type") == "interaction_request":
                 handle_interaction_request(request.get("data"))
+            elif request.get("type") == "get_context_response":
+                # This is handled by the request_context function's loop
+                pass
             elif request.get("type") == "ping": # Example control message
                 send_message("pong", request.get("session", "control"))
-                # Handle other control messages if needed (e.g., shutdown)
+            elif request.get("type") == "tool_result":
+                print(f"Worker ignoring unexpected tool_result message: {line.strip()}", file=sys.stderr)
+            else:
+                print(f"Worker received unknown message type: {request.get('type')}", file=sys.stderr)
 
         except json.JSONDecodeError:
             # Log error but try to continue reading
-             print(json.dumps({"type": "error", "session":"unknown", "message": f"Worker received invalid JSON: {line.strip()}"}), flush=True)
+            print(json.dumps({"type": "error", "session":"unknown", "message": f"Worker received invalid JSON: {line.strip()}"}), flush=True)
         except Exception as e:
             # Log unexpected errors
             tb_str = traceback.format_exc()
             print(json.dumps({"type": "error", "session":"unknown", "message": f"Worker main loop error: {e}\n{tb_str}"}), flush=True)
             # Depending on the error, might want to break or continue
             time.sleep(1) # Avoid tight loop on persistent error
-
-
-def request_environment_details(session_path):
-    """Sends a request for environment details and waits for the result."""
-    request_id = f"env_{time.time_ns()}" # Unique ID for the request
-    send_message("get_environment_details_request", session_path, request_id=request_id)
-    # Wait for the corresponding response from stdin
-    while True:
-        try:
-            line = sys.stdin.readline()
-            if not line:
-                send_message("error", session_path, message="Stdin closed unexpectedly while waiting for env details. Exiting.")
-                sys.exit(1)
-            response = json.loads(line)
-            if response.get("type") == "get_environment_details_response" and response.get("request_id") == request_id:
-                return response.get("details", "") # Return details string or empty
-        except json.JSONDecodeError:
-            send_message("error", session_path, message=f"Worker received invalid JSON from stdin while waiting for env details: {line.strip()}")
-        except Exception as e:
-            send_message("error", session_path, message=f"Error reading env details result from stdin: {e}")
-            return f"<environment_details>\n# Error receiving details: {e}\n</environment_details>" # Return error state
-
 
 if __name__ == "__main__":
     main()

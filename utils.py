@@ -275,9 +275,9 @@ def touch(path):
 
 
 # --- Filtering Helper ---
-def _filter_environment_details(text: str) -> str:
-    """Removes <environment_details>...</environment_details> blocks from text."""
+def _filter_context(text: str) -> str:
+    """Removes <context>...</context> blocks from text."""
     if not isinstance(text, str): # Handle potential non-string content
         return text
     # Use re.DOTALL to make '.' match newlines, make it non-greedy
-    return re.sub(r"<environment_details>.*?</environment_details>\s*", "\n", text, flags=re.DOTALL)
+    return re.sub(r"<context>.*?</context>\s*", "\n", text, flags=re.DOTALL)
