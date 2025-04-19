@@ -9,7 +9,7 @@
 ;; Copyright (C) 2025, Emigo, all rights reserved.
 ;; Created: 2025-03-29
 ;; Version: 0.5
-;; Last-Updated: Sat Apr 19 02:20:38 2025 (-0400)
+;; Last-Updated: Sat Apr 19 02:44:07 2025 (-0400)
 ;;           By: Mingde (Matthew) Zeng
 ;; Package-Requires: ((emacs "26.1") (transient "0.3.0") (compat "30.0.2.0") (markdown-mode "2.6"))
 ;; Keywords: ai emacs llm aider ai-pair-programming tools
@@ -721,8 +721,6 @@ ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
     (overlay-put overlay 'front-sticky t)
     (overlay-put overlay 'rear-nonsticky nil)))
 
-;; --- Window Management Advice ---
-
 (defun emigo--advice-delete-other-windows (orig-fun &rest args)
   "Around advice for `delete-other-windows'.
 Prevent deleting the dedicated Emigo window."
@@ -796,33 +794,33 @@ The file path is relative to the session directory."
 (defun emigo-drop-file-from-context ()
   "Remove a file from the current project's Emigo chat context."
   (interactive)
-  (unless (emigo-epc-live-p emigo-epc-process)
-    (message "[Emigo] Process not running.")
-    (emigo-start-process)            ; Attempt to start if not running
-    (error "Emigo process was not running, please try again shortly."))
+  (cl-block emigo-drop-file-from-context
+    (condition-case err
+        (progn
+          (unless (emigo-epc-live-p emigo-epc-process)
+            (message "[Emigo] Process not running.")
+            (emigo-start-process)            ; Attempt to start if not running
+            (error "Emigo process was not running, please try again shortly."))
 
-  (let ((buffer (emigo-get-buffer-name t)))
-    (unless buffer
-      (error "[Emigo] No Emigo buffer found"))
+          (let ((buffer (emigo-get-buffer-name t)))
+            (unless buffer
+              (error "[Emigo] No Emigo buffer found"))
 
-    (with-current-buffer buffer
-      (unless emigo-session-path
-        (error "[Emigo] Could not determine session path from buffer"))
+            (with-current-buffer buffer
+              (unless emigo-session-path
+                (error "[Emigo] Could not determine session path from buffer"))
 
-      (let ((chat-files (emigo-call--sync "get_chat_files" emigo-session-path))
-            (file-to-remove nil))
+              (let ((chat-files (emigo-call--sync "get_chat_files" emigo-session-path)))
+                (unless chat-files
+                  (message "[Emigo] No files currently in chat context for session: %s" emigo-session-path)
+                  (cl-return-from emigo-drop-file-from-context nil))
 
-        (unless chat-files
-          (message "[Emigo] No files currently in chat context for session: %s" emigo-session-path)
-          (cl-return-from emigo-drop-file-from-context))
-
-        (setq file-to-remove (completing-read "Remove file from context: " chat-files nil t))
-
-        (when (and file-to-remove (member file-to-remove chat-files))
-          ;; Corrected: Pass method name first, then session path and file
-          (emigo-call-async "remove_file_from_context" emigo-session-path file-to-remove))))))
-
-;; --- Interaction Handlers (Called from Python) ---
+                (let ((file-to-remove (completing-read "Remove file from context: " chat-files nil t)))
+                  (when (and file-to-remove (member file-to-remove chat-files))
+                    (emigo-call-async "remove_file_from_context" emigo-session-path file-to-remove)))))))
+      (error
+       (message "[Emigo] Error in drop-file-from-context: %s" (error-message-string err))
+       nil))))
 
 (defun emigo--file-written-externally (abs-path)
   "Inform Emacs that the file at ABS-PATH was modified externally.
@@ -843,11 +841,6 @@ If the file is visited in a buffer, offer to revert it."
   ;; TODO: Maybe update a mode-line indicator?
   (message "[Emigo] Agent finished for session: %s" session-path)
   nil)
-
-;; Removed tool-related sync functions:
-;; - emigo--execute-command-sync
-;; - emigo--list-files-sync
-;; - emigo--search-files-sync
 
 (defun emigo--clear-local-buffer (session-path)
   "Clear the local Emacs buffer content for SESSION-PATH.

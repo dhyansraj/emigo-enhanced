@@ -19,16 +19,15 @@ import subprocess
 import json
 import queue
 import time
-import re
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 
 from epc.server import ThreadingEPCServer
-from utils import (
-    init_epc_client, close_epc_client, eval_in_emacs, message_emacs,
-    get_emacs_vars, get_emacs_func_result, _filter_context
-)
-from session import Session
-from typing import Any # Add Any
+
+from context import Context
+# Import utility functions
+from utils import (close_epc_client, eval_in_emacs, get_emacs_func_result,
+                   get_emacs_vars, init_epc_client, message_emacs,
+                   _filter_context)
 
 class Emigo:
     def __init__(self, args):
@@ -53,7 +52,7 @@ class Emigo:
         # Init vars.
         print("Emigo __init__: Initializing internal variables...", file=sys.stderr, flush=True) # DEBUG + flush
         # Replace individual state dicts with a single sessions dictionary
-        self.sessions: Dict[str, Session] = {} # Key: session_path, Value: Session object
+        self.sessions: Dict[str, Context] = {} # Key: session_path, Value: Context object
 
         # --- Worker Process Management ---
         self.llm_worker_process: Optional[subprocess.Popen] = None
@@ -190,24 +189,24 @@ class Emigo:
                     message_emacs(f"Error: LLM worker process failed to start (exit code {exit_code}). Check *Messages* or Emigo process buffer.")
                     return # Exit the function
 
-                print(f"_start_llm_worker: LLM worker started (PID: {self.llm_worker_process.pid}).", file=sys.stderr, flush=True)
+                print(f"_start_llm_worker: LLM worker started (PID: {self.llm_worker_process.pid}).", file=sys.stderr, flush=True) # DEBUG + flush
 
                 # Create and start the stdout reader thread *after* process starts
                 print("_start_llm_worker: Starting stdout reader thread...", file=sys.stderr, flush=True) # DEBUG + flush
                 self.llm_worker_reader_thread = threading.Thread(target=self._read_worker_stdout, name="WorkerStdoutReader", daemon=True)
                 self.llm_worker_reader_thread.start()
-                if not self.llm_worker_reader_thread.is_alive():
-                    print("_start_llm_worker: ERROR - stdout reader thread failed to start.", file=sys.stderr, flush=True)
+                if not self.llm_worker_reader_thread.is_alive(): # DEBUG + flush
+                    print("_start_llm_worker: ERROR - stdout reader thread failed to start.", file=sys.stderr, flush=True) # DEBUG + flush
                     # Attempt to stop worker if it's running
                     if self.llm_worker_process and self.llm_worker_process.poll() is None:
                         self.llm_worker_process.terminate()
                         self.llm_worker_process = None
                     return
 
-                print("_start_llm_worker: Starting stderr reader thread...", file=sys.stderr, flush=True)
+                print("_start_llm_worker: Starting stderr reader thread...", file=sys.stderr, flush=True) # DEBUG + flush
                 self.llm_worker_stderr_thread = threading.Thread(target=self._read_worker_stderr, name="WorkerStderrReader", daemon=True)
                 self.llm_worker_stderr_thread.start()
-                if not self.llm_worker_stderr_thread.is_alive():
+                if not self.llm_worker_stderr_thread.is_alive(): # DEBUG + flush
                     print("_start_llm_worker: ERROR - stderr reader thread failed to start.", file=sys.stderr, flush=True)
                     # Attempt cleanup
                     if self.llm_worker_process and self.llm_worker_process.poll() is None:
@@ -222,15 +221,6 @@ class Emigo:
                 self.llm_worker_process = None
                 # Optionally notify Emacs of the failure
                 message_emacs(f"Error: Failed to start LLM worker subprocess: {e}")
-
-    def _get_context_string(self, session_path: str) -> str:
-        """Delegates fetching environment details to the Session object."""
-        session = self._get_or_create_session(session_path)
-        if session:
-            return session.get_context_string()
-        else:
-            # Should not happen if session_path is validated earlier
-            return "<context>\n# Error: Could not get/create session.\n</context>"
 
     def _stop_llm_worker(self):
         """Stops the LLM worker subprocess and reader threads."""
@@ -379,10 +369,6 @@ class Emigo:
                 if msg_type == "stream":
                     role = message.get("role", "llm") # e.g., "llm", "user", "tool_json", "tool_json_args"
                     content = message.get("content", "") # Default to empty string
-                    tool_id = message.get("tool_id") # Present for tool_json roles
-                    tool_name = message.get("tool_name") # Present for tool_json role
-
-                    # Filter content *unless* it's a tool argument chunk
                     if role != "tool_json_args":
                         filtered_content = _filter_context(content)
                     else:
@@ -411,24 +397,27 @@ class Emigo:
                     if status in ["success", "max_turns_reached"]:
                         final_history = message.get("final_history")
                         if final_history and isinstance(final_history, list):
-                            session = self._get_or_create_session(session_path)
-                            if session:
+                            context = self._get_or_create_context(session_path)
+                            if context:
                                 # Filter history content before setting it
                                 filtered_history = []
                                 for msg in final_history:
                                     if isinstance(msg, dict) and "content" in msg:
                                         filtered_msg = dict(msg) # Copy message
-                                        filtered_msg["content"] = _filter_context(msg["content"])
+                                        # Ensure content is string before filtering
+                                        if not isinstance(filtered_msg.get("content"), str):
+                                            filtered_msg["content"] = str(filtered_msg.get("content", ""))
+                                        filtered_msg["content"] = _filter_context(filtered_msg["content"])
                                         filtered_history.append(filtered_msg)
                                     else:
                                         filtered_history.append(msg) # Keep non-dict or content-less items as is
 
                                 print(f"Updating session history for {session_path} with {len(filtered_history)} filtered messages.", file=sys.stderr)
-                                session.set_history(filtered_history) # Use the filtered history
+                                context.set_history(filtered_history) # Use the filtered history
                             else:
-                                print(f"Error: Could not find session {session_path} to update history.", file=sys.stderr)
+                                print(f"Error: Could not find context {session_path} to update history.", file=sys.stderr) # Update error message
                         elif status in ["success", "max_turns_reached"]: # Only warn if history was expected
-                            print(f"Warning: Worker finished successfully but did not provide final history for {session_path}.", file=sys.stderr)
+                            print(f"Warning: Worker finished successfully but did not provide final history for {session_path}.", file=sys.stderr) # DEBUG
 
                     # Signal Emacs regardless of history update success
                     eval_in_emacs("emigo--agent-finished", session_path)
@@ -436,28 +425,19 @@ class Emigo:
 
                 elif msg_type == "error":
                     error_msg = message.get("message", "Unknown error from worker")
-                    print(f"Error from worker ({session_path}): {error_msg}", file=sys.stderr)
+                    # DEBUG: Print the raw error message received
+                    print(f"Raw error message from worker ({session_path}): {message}", file=sys.stderr)
+                    print(f"Error from worker ({session_path}): {error_msg}", file=sys.stderr) # DEBUG
                     eval_in_emacs("emigo--flush-buffer", session_path, f"[Worker Error: {error_msg}]", "error")
                     # If an error occurs, consider the interaction finished
                     if self.active_interaction_session == session_path:
                         self.active_interaction_session = None
+                        print(f"Cleared active interaction flag for session {session_path} due to worker error.", file=sys.stderr) # Debug
 
-                elif msg_type == "get_context_request":
-                    request_id = message.get("request_id")
-                    if request_id:
-                        print(f"Worker requested environment details for {session_path}", file=sys.stderr)
-                        details = self._get_context_string(session_path)
-                        self._send_to_worker({
-                            "type": "get_context_response",
-                            "request_id": request_id,
-                            "session": session_path, # Include session for routing if needed
-                            "details": details
-                        })
-                    else:
-                        print(f"Invalid get_context_request from worker (missing request_id): {message}", file=sys.stderr)
+                # get_context_request is removed as context is generated upfront in emigo_send
 
                 elif msg_type == "pong": # Handle ping response
-                    print(f"Received pong from worker for session: {session_path}", file=sys.stderr)
+                    print(f"Received pong from worker for session: {session_path}", file=sys.stderr) # DEBUG
 
                 # Handle other message types (status, etc.) if needed
             except json.JSONDecodeError:
@@ -465,215 +445,249 @@ class Emigo:
             except Exception as e:
                 print(f"Error processing worker queue message: {e}\n{traceback.format_exc()}", file=sys.stderr)
 
-    # --- Tool Handling Method Removed ---
+    # --- Context Management ---
 
-    # --- Session Management ---
-
-    def _get_or_create_session(self, session_path: str) -> Optional[Session]:
-        """Gets the Session object for a path, creating it if necessary."""
+    def _get_or_create_context(self, session_path: str) -> Optional[Context]:
+        """Gets the Context object for a path, creating it if necessary."""
         if not os.path.isdir(session_path):
-            print(f"ERROR: Invalid session path (not a directory): {session_path}", file=sys.stderr)
+            print(f"ERROR: Invalid context path (not a directory): {session_path}", file=sys.stderr)
             # Maybe notify Emacs here?
-            eval_in_emacs("message", f"[Emigo Error] Invalid session path: {session_path}")
+            eval_in_emacs("message", f"[Emigo Error] Invalid context path: {session_path}")
             return None
 
         if session_path not in self.sessions:
-            print(f"Creating new session object for: {session_path}", file=sys.stderr)
+            print(f"Creating new context object for: {session_path}", file=sys.stderr)
             # Get verbose setting from config (assuming a way to get it, defaulting to True for now)
             # Example: config_verbose = get_config_value('verbose', True)
             config_verbose = True # Placeholder
-            self.sessions[session_path] = Session(session_path=session_path, verbose=config_verbose)
+            self.sessions[session_path] = Context(session_path=session_path, verbose=config_verbose)
         return self.sessions[session_path]
 
     # --- EPC Methods Called by Emacs ---
 
     def get_history(self, session_path: str) -> List[Tuple[float, Dict]]:
-        """EPC: Retrieves the chat history as list of (timestamp, message_dict) tuples."""
-        session = self._get_or_create_session(session_path)
-        # Ensure get_history() is called on the session object
-        return session.get_history() if session else []
+        """EPC: Retrieves the chat history via the Context object."""
+        context = self._get_or_create_context(session_path)
+        if not context:
+            message_emacs(f"Error: Could not establish context for {session_path}")
+            return []
+        return context.get_history()
 
     def add_file_to_context(self, session_path: str, filename: str) -> bool:
-        """EPC: Adds a specific file to the chat context for a session."""
-        session = self._get_or_create_session(session_path)
-        if not session:
-            message_emacs(f"Error: Could not establish session for {session_path}")
+        """EPC: Adds a file via the Context object."""
+        context = self._get_or_create_context(session_path)
+        if not context:
+            message_emacs(f"Error: Could not establish context for {session_path}")
             return False
-
-        success, msg = session.add_file_to_context(filename)
-        message_emacs(msg) # Display message (success or error) in Emacs
+        # Call context method directly
+        success, msg = context.add_file_to_context(filename)
+        # Context class handles messaging Emacs
         return success
 
     def remove_file_from_context(self, session_path: str, filename: str) -> bool:
-        """EPC: Removes a specific file from the chat context for a session."""
-        session = self._get_or_create_session(session_path)
-        if not session:
-            message_emacs(f"Error: No session found for {session_path}")
+        """EPC: Removes a file via the Context object."""
+        context = self._get_or_create_context(session_path)
+        if not context:
+            message_emacs(f"Error: No context found for {session_path}")
             return False
-
-        success, msg = session.remove_file_from_context(filename)
-        message_emacs(msg) # Display message (success or error) in Emacs
+        # Call context method directly
+        success, msg = context.remove_file_from_context(filename)
+        # Context class handles messaging Emacs
         return success
 
-    def emigo_send(self, session_path: str, prompt: str, history_override: Optional[List[Dict]] = None):
-        """EPC: Handles a user prompt or revised history to initiate an interaction.
+    def get_chat_files(self, session_path: str) -> List[str]:
+        """EPC: Retrieves the list of chat files via the Context object."""
+        context = self._get_or_create_context(session_path)
+        if not context:
+            message_emacs(f"Error: No context found for {session_path}")
+            return [] # Return empty list on error
+        # Call context method directly
+        return context.get_chat_files()
 
+    def emigo_send(self, session_path: str, prompt: str, history_override: Optional[List[Dict]] = None):
+        """
+        EPC: Handles a user prompt or revised history to initiate an LLM interaction.
+
+        Gets the session, handles history override or appends the new prompt,
+        generates the context string (which also handles @file mentions),
+        retrieves necessary config, and sends the interaction request to the worker.
+
+        Args:
         Args:
             session_path: The path identifying the session.
             prompt: The user's input prompt (used if history_override is None).
-            history_override: If provided, replaces the current session history.
+            history_override: If provided, replaces the current session history via the Context.
         """
+        # --- Pre-Interaction Checks ---
         if history_override:
-            print(f"Received revised history for session: {session_path}", file=sys.stderr)
+            print(f"Received revised history for session: {session_path}", file=sys.stderr) # DEBUG
             if not isinstance(history_override, list):
                  message_emacs(f"[Emigo Error] Received history_override is not a list: {type(history_override)}")
                  return
-            # Convert Elisp plist format (list of lists) to Python list of dicts if necessary
-            # Assuming Elisp side now sends list of dicts directly or conversion happens there
-            # For safety, let's add a check/conversion here if needed.
-            # This example assumes history_override is already List[Dict]
-            history_dicts = history_override # Assuming correct format
+            # Assuming history_override is List[Dict] as sent from Elisp
+            history_dicts = history_override
         else:
-            print(f"Received prompt for session: {session_path}: {prompt}", file=sys.stderr)
+            print(f"Received prompt for session: {session_path}: {prompt[:100]}...", file=sys.stderr) # DEBUG (limit prompt length)
 
         # Check if another interaction is already running
         if self.active_interaction_session:
+            # DEBUG: Log which session is active
+            print(f"DEBUG: Active interaction session is {self.active_interaction_session}", file=sys.stderr)
             # Determine message based on whether it's a new prompt or revised history
             action_desc = "re-run with the revised history" if history_override else "re-run with your new prompt"
-            print(f"Interaction already active for session {self.active_interaction_session}. Asking user about new prompt for {session_path}.", file=sys.stderr)
+            print(f"Interaction already active for session {self.active_interaction_session}. Asking user about new request for {session_path}.", file=sys.stderr) # DEBUG
             try:
                 # Ask user in Emacs if they want to cancel the active session and proceed
                 confirm_cancel = get_emacs_func_result("yes-or-no-p",
-                                                       f"LLM is currently running, do you want to stop it and {action_desc}?")
+                                                       f"LLM is currently running for '{self.active_interaction_session}', do you want to stop it and {action_desc}?")
 
                 if confirm_cancel:
-                    print(f"User confirmed cancellation of {self.active_interaction_session}. Proceeding with {session_path}.", file=sys.stderr)
+                    print(f"User confirmed cancellation of {self.active_interaction_session}. Proceeding with {session_path}.", file=sys.stderr) # DEBUG
                     # Cancel the currently active interaction. This also resets self.active_interaction_session.
                     if not self.cancel_llm_interaction(self.active_interaction_session): # Check return value
                         message_emacs("[Emigo Error] Failed to cancel previous interaction.")
                         return # Stop if cancellation failed
+                    # Cancellation successful, self.active_interaction_session is now None
+                    print(f"DEBUG: Active session should be None after successful cancellation: {self.active_interaction_session}", file=sys.stderr)
                 else:
                     # User declined, ignore the new request
                     ignore_desc = "Revised history" if history_override else "New prompt"
-                    print(f"User declined cancellation. Ignoring {ignore_desc.lower()} for {session_path}.", file=sys.stderr)
+                    print(f"User declined cancellation. Ignoring {ignore_desc.lower()} for {session_path}.", file=sys.stderr) # DEBUG
                     eval_in_emacs("message", f"[Emigo] LLM busy with {self.active_interaction_session}. {ignore_desc} ignored.")
                     return # Stop processing the new request
 
             except Exception as e:
-                print(f"Error during confirmation/cancellation: {e}\n{traceback.format_exc()}", file=sys.stderr)
+                print(f"Error during confirmation/cancellation: {e}\n{traceback.format_exc()}", file=sys.stderr) # DEBUG
                 message_emacs(f"[Emigo Error] Failed to ask for cancellation confirmation: {e}") # Keep error message generic
                 return # Stop processing on error
 
+        # --- Prepare Interaction ---
         # If we reach here, either no interaction was active, or the user confirmed cancellation.
-        # Mark the *new* session as active.
+        # Mark the *new* context as active *before* any potentially failing operations.
         self.active_interaction_session = session_path
+        print(f"DEBUG: Set active interaction context to: {self.active_interaction_session}", file=sys.stderr)
 
-        # Get or create the session object
-        session = self._get_or_create_session(session_path)
-        if not session:
-            # Error already logged by _get_or_create_session
-            eval_in_emacs("emigo--flush-buffer", f"invalid-session-{session_path}", f"[Error: Invalid session path '{session_path}']", "error")
+        # Get or create the context object
+        context = self._get_or_create_context(session_path)
+        if not context:
+            # Error already logged by _get_or_create_context
+            eval_in_emacs("emigo--flush-buffer", f"invalid-context-{session_path}", f"[Error: Invalid context path '{session_path}']", "error")
             self.active_interaction_session = None # Clear flag on error
             return
 
-        # --- History Handling ---
+        # --- History & Context Handling (Directly on Context) ---
         if history_override:
-            # Replace the session's history with the provided override
-            print(f"Replacing history for session {session_path} with {len(history_dicts)} revised messages.", file=sys.stderr)
-            session.set_history(history_dicts)
+            # Replace the context's history
+            print(f"Replacing history for context {session_path}.", file=sys.stderr) # DEBUG
+            context.set_history(history_dicts)
             # Optionally flush a marker to Emacs buffer?
-            # eval_in_emacs("emigo--flush-buffer", session.session_path, "\n[History revised by user]\n", "info") # Example
+            eval_in_emacs("emigo--flush-buffer", context.session_path, "\n[History revised by user]\n", "info") # Example
+            # Generate context string *without* processing the placeholder prompt for mentions
+            context_str = context.generate_context_string(current_prompt=None)
         else:
             # Standard prompt: Flush to buffer and append to history
-            eval_in_emacs("emigo--flush-buffer", session.session_path, f"\n\nUser:\n{prompt}\n", "user")
-            session.append_history({"role": "user", "content": prompt})
-
-            # --- Handle File Mentions (@file) only for standard prompts ---
-            mention_pattern = r'@(\S+)'
-            mentioned_files_in_prompt = re.findall(mention_pattern, prompt)
-            if mentioned_files_in_prompt:
-                print(f"Found file mentions in prompt: {mentioned_files_in_prompt}", file=sys.stderr)
-                for file in mentioned_files_in_prompt:
-                    success, msg = session.add_file_to_context(file)
-                    if success:
-                        message_emacs(msg) # Notify Emacs only on successful add
+            eval_in_emacs("emigo--flush-buffer", context.session_path, f"\n\nUser:\n{prompt}\n", "user")
+            context.append_history({"role": "user", "content": prompt})
+            # Generate context string *and* handle @file mentions in the prompt
+            print(f"Generating context string for {session_path}, processing prompt for mentions.", file=sys.stderr) # DEBUG
+            context_str = context.generate_context_string(current_prompt=prompt)
 
         # --- Prepare data for worker ---
-        # Get current state snapshot (reflects appended prompt or overridden history)
-        session_history = session.get_history()
-        session_chat_files = session.get_chat_files()
-        # Generate the full context string using the new method
-        context_str = session.get_context_string()
+        # Get current state snapshot from the Context
+        session_history = context.get_history()
+        session_chat_files = context.get_chat_files()
 
         # Get model config from Emacs vars
         vars_result = get_emacs_vars(["emigo-model", "emigo-base-url", "emigo-api-key"])
         if not vars_result or len(vars_result) < 3:
-            message_emacs(f"Error retrieving Emacs variables for session {session_path}.")
-            self.active_interaction_session = None # Unset active session
+            # DEBUG: Log the result received from Emacs
+            print(f"DEBUG: Failed to get Emacs vars. Received: {vars_result}", file=sys.stderr)
+            message_emacs(f"Error retrieving Emacs variables for context {session_path}.")
+            self.active_interaction_session = None # Unset active context
             return
-        model, base_url, api_key = vars_result
+        # Unpack results carefully, providing defaults if None
+        model = vars_result[0]
+        base_url = vars_result[1]
+        api_key = vars_result[2]
 
-        if not model:
-            message_emacs(f"Please set emigo-model before starting session {session.session_path}.")
-            self.active_interaction_session = None # Unset active session
+        # Validate model format (must exist and contain '/')
+        if not model or '/' not in model:
+            error_msg = f"Invalid or missing emigo-model: '{model}'. Expected 'provider/model_name' (e.g., 'ollama/llama3', 'openai/gpt-4o')."
+            print(f"ERROR: {error_msg}", file=sys.stderr) # Log error
+            message_emacs(f"[Emigo Error] {error_msg}") # Send error to Emacs user
+            self.active_interaction_session = None # Unset active context
             return
 
         worker_config = {
             "model": model,
-            "api_key": api_key if api_key else None,
-            "base_url": base_url if base_url else None,
-            "verbose": session.verbose # Use session's verbose setting
+            "api_key": api_key,
+            "base_url": base_url,
+            "verbose": context.verbose
         }
 
         # Prepare the state snapshot for the worker
-        # Use the last message content from history as the nominal 'prompt' for the worker,
-        # especially relevant if history was overridden.
-        effective_prompt = session_history[-1].get("content", "") if session_history else prompt
+        # Use the last message content from history as the nominal 'prompt' for the worker.
+        # This is important because the worker uses it for context/logging.
+        effective_prompt = session_history[-1][1].get("content", "") if session_history else prompt
 
         request_data = {
-            "session_path": session.session_path, # Use absolute path from session
+            "session_path": context.session_path, # Use absolute path from context
             "prompt": effective_prompt, # Use content of last message or original prompt
-            "history": session_history, # Pass current history snapshot
+            "history": session_history, # Pass current history snapshot (list of tuples)
             "config": worker_config,
             "chat_files": session_chat_files, # Pass chat files snapshot
-            "context": context_str, # Pass generated details
+            "context": context_str, # Pass generated context string
         }
 
         # --- Send request to worker ---
-        print(f"Sending interaction request to worker for session {session.session_path}", file=sys.stderr)
+        print(f"Sending interaction request to worker for context {context.session_path}", file=sys.stderr) # DEBUG
         self._send_to_worker({
             "type": "interaction_request",
             "data": request_data
         })
         # The response handling happens asynchronously in _process_worker_queue
 
-    def cancel_llm_interaction(self, session_path: str):
-        """Cancels the current LLM interaction by killing and restarting the worker."""
-        print(f"Received request to cancel interaction for session: {session_path}", file=sys.stderr)
+    def cancel_llm_interaction(self, session_path: str) -> bool:
+        """
+        Cancels the current LLM interaction by killing and restarting the worker.
+        Also clears the active session flag and invalidates the session cache.
+
+        Returns:
+            bool: True if cancellation (including worker restart) was successful, False otherwise.
+        """
+        print(f"Received request to cancel interaction for session: {session_path}", file=sys.stderr) # DEBUG
         # Check if the cancellation request is for the currently active session
         if self.active_interaction_session != session_path:
             message_emacs(f"No active interaction found for session {session_path} to cancel.")
-            return
+            # Return True because there was nothing *to* cancel for this session.
+            # Or False? Let's return False as no cancellation *action* was performed.
+            return False
 
-        print("Stopping and restarting LLM worker due to cancellation request...", file=sys.stderr)
-        self._stop_llm_worker()
+        print("Stopping and restarting LLM worker due to cancellation request...", file=sys.stderr) # DEBUG
+        self._stop_llm_worker() # Stops process and queue processor thread
 
-        # Drain the queue to discard messages from the stopped worker
-        print("Draining worker output queue...", file=sys.stderr)
+        # Drain the queue *after* stopping the old processor thread
+        print("Draining worker output queue...", file=sys.stderr) # DEBUG
         drained_count = 0
-        while not self.worker_output_queue.empty():
+        while True: # Loop until queue is empty or error
             try:
-                _ = self.worker_output_queue.get_nowait()
+                # Use timeout to avoid blocking indefinitely if queue is empty
+                stale_msg = self.worker_output_queue.get(block=True, timeout=0.1)
+                if stale_msg is None: # Check for sentinel from previous run
+                    continue
                 # print(f"Discarding stale message: {stale_msg}", file=sys.stderr) # Optional: very verbose
                 drained_count += 1
+                self.worker_output_queue.task_done() # Mark task as done
             except queue.Empty:
-                break
+                break # Exit loop when queue is empty
             except Exception as e:
-                print(f"Error draining queue: {e}", file=sys.stderr)
+                print(f"Error draining queue: {e}", file=sys.stderr) # DEBUG
                 break # Stop draining on error
-            print(f"Worker output queue drained ({drained_count} messages discarded).", file=sys.stderr)
+        print(f"Worker output queue drained ({drained_count} messages discarded).", file=sys.stderr) # DEBUG
 
-        self._start_llm_worker()
+        # Restart the worker process
+        self._start_llm_worker() # Starts process and reader threads
+
         # Check if worker restart was successful before proceeding
         worker_restarted_ok = False
         with self.llm_worker_lock:
@@ -681,50 +695,57 @@ class Emigo:
                 worker_restarted_ok = True
 
         if not worker_restarted_ok:
-            print("ERROR: Failed to restart LLM worker after cancellation.", file=sys.stderr)
+            print("ERROR: Failed to restart LLM worker after cancellation.", file=sys.stderr) # DEBUG
             message_emacs("[Emigo Error] Failed to restart LLM worker after cancellation.")
             # Clear active session state even on failure
             self.active_interaction_session = None
             return False # Indicate failure
 
-        print("LLM worker restarted successfully.", file=sys.stderr)
+        print("LLM worker restarted successfully.", file=sys.stderr) # DEBUG
 
         # --- Restart the worker queue processor thread ---
-        print("Restarting worker queue processor thread...", file=sys.stderr)
+        print("Restarting worker queue processor thread...", file=sys.stderr) # DEBUG
         self.worker_processor_thread = threading.Thread(target=self._process_worker_queue, name="WorkerQueueProcessorThread", daemon=True)
         self.worker_processor_thread.start()
         if not self.worker_processor_thread.is_alive():
-            print("ERROR: Failed to restart worker queue processor thread.", file=sys.stderr)
+            print("ERROR: Failed to restart worker queue processor thread.", file=sys.stderr) # DEBUG
             message_emacs("[Emigo Error] Failed to restart worker queue processor thread.")
             # Stop the worker again if the processor fails
             self._stop_llm_worker()
             self.active_interaction_session = None
-            # Removed pending_tool_requests.clear()
             return False # Indicate failure
-        print("Worker queue processor thread restarted.", file=sys.stderr)
+        print("Worker queue processor thread restarted.", file=sys.stderr) # DEBUG
         # --- End restart queue processor ---
 
-        # Remove the last user message (the cancelled prompt) from history
-        session = self.sessions.get(session_path)
-        if session and session.history:
+        # --- Post-Cancellation State Updates ---
+        # Get the context object
+        context = self.sessions.get(session_path)
+
+        # Remove the last user message (the cancelled prompt) from history via Context
+        if context:
             # History is stored as (timestamp, message_dict)
-            last_timestamp, last_message = session.history[-1]
-            if last_message.get("role") == "user":
-                print(f"Removing cancelled user prompt from history for {session_path}", file=sys.stderr)
-                session.history.pop()
+            history = context.get_history() # Get current history
+            if history:
+                last_timestamp, last_message = history[-1]
+                if last_message.get("role") == "user":
+                    print(f"Removing cancelled user prompt from history for {session_path}", file=sys.stderr) # DEBUG
+                    # Create a new list excluding the last message
+                    new_history_dicts = [msg for ts, msg in history[:-1]]
+                    context.set_history(new_history_dicts) # Update history
+                else:
+                    print(f"Warning: Last message in history for cancelled context {session_path} was not from user.", file=sys.stderr) # DEBUG
             else:
-                print(f"Warning: Last message in history for cancelled session {session_path} was not from user.", file=sys.stderr)
+                 print(f"DEBUG: History for context {session_path} was empty, nothing to remove.", file=sys.stderr)
 
-        # Clear active session state
-        self.active_interaction_session = None
-        # Removed pending_tool_requests.clear()
-
-        # Invalidate the cache for the cancelled session to ensure fresh context next time
-        if session:
-            print(f"Invalidating cache for cancelled session: {session_path}", file=sys.stderr)
-            session.invalidate_cache()
+            # Invalidate the cache for the cancelled context to ensure fresh context next time
+            print(f"Invalidating cache for cancelled context: {session_path}", file=sys.stderr) # DEBUG
+            context.invalidate_cache()
         else:
-            print(f"Warning: Could not find session {session_path} to invalidate cache after cancellation.", file=sys.stderr)
+            print(f"Warning: Could not find context {session_path} to update history or invalidate cache after cancellation.", file=sys.stderr) # DEBUG
+
+        # Clear active context state *after* all operations
+        print(f"DEBUG: Clearing active interaction context flag (was {self.active_interaction_session}).", file=sys.stderr)
+        self.active_interaction_session = None
 
         # Notify Emacs buffer
         eval_in_emacs("emigo--flush-buffer", session_path, "\n[Interaction cancelled by user.]\n", "warning")
@@ -732,30 +753,30 @@ class Emigo:
 
     def cleanup(self):
         """Do some cleanup before exit python process."""
-        print("Running Emigo cleanup...", file=sys.stderr)
+        print("Running Emigo cleanup...", file=sys.stderr) # DEBUG
         self._stop_llm_worker()
         close_epc_client()
-        print("Emigo cleanup finished.", file=sys.stderr)
+        print("Emigo cleanup finished.", file=sys.stderr) # DEBUG
 
     def clear_history(self, session_path: str) -> bool:
-        """EPC: Clear the chat history for the given session path."""
-        print(f"Clearing history for session: {session_path}", file=sys.stderr)
-        session = self._get_or_create_session(session_path)
-        if session:
-            session.clear_history()
+        """EPC: Clear the chat history for the given context path."""
+        print(f"Clearing history for context: {session_path}", file=sys.stderr) # DEBUG
+        context = self._get_or_create_context(session_path)
+        if context:
+            context.clear_history()
             # Also clear local buffer via Emacs side
-            eval_in_emacs("emigo--clear-local-buffer", session.session_path)
-            message_emacs(f"Cleared history for session: {session.session_path}")
+            eval_in_emacs("emigo--clear-local-buffer", context.session_path)
+            message_emacs(f"Cleared history for context: {context.session_path}")
             return True
         else:
-            message_emacs(f"No session found to clear history for: {session_path}")
+            message_emacs(f"No context found to clear history for: {session_path}")
             return False
 
 
 if __name__ == "__main__":
     print("emigo.py starting execution...", file=sys.stderr, flush=True) # DEBUG + flush
     if len(sys.argv) < 2:
-        print("ERROR: Missing EPC server port argument.", file=sys.stderr, flush=True)
+        print("ERROR: Missing EPC server port argument.", file=sys.stderr, flush=True) # DEBUG + flush
         sys.exit(1)
     try:
         print("Initializing Emigo class...", file=sys.stderr, flush=True) # DEBUG + flush
@@ -766,21 +787,30 @@ if __name__ == "__main__":
         # just wait indefinitely or until interrupted.
         print("Main thread entering wait loop (Ctrl+C to exit)...", file=sys.stderr, flush=True) # DEBUG + flush
         while True:
-            time.sleep(3600) # Sleep for a long time, wake up periodically if needed
+            # Check if the EPC server thread is still alive periodically
+            if not emigo.server_thread.is_alive():
+                 print("ERROR: Python EPC server thread has died. Exiting.", file=sys.stderr, flush=True)
+                 break # Exit the loop if server thread dies
+            # Check if worker process is alive (optional, might restart automatically)
+            # with emigo.llm_worker_lock:
+            #     if emigo.llm_worker_process and emigo.llm_worker_process.poll() is not None:
+            #         print("Warning: LLM worker process seems to have died.", file=sys.stderr, flush=True)
+            #         # Consider attempting restart here or letting _send_to_worker handle it
+            time.sleep(5) # Check every 5 seconds
 
     except KeyboardInterrupt:
-        print("\nKeyboardInterrupt received, cleaning up...", file=sys.stderr, flush=True)
+        print("\nKeyboardInterrupt received, cleaning up...", file=sys.stderr, flush=True) # DEBUG + flush
         if 'emigo' in locals() and emigo:
             emigo.cleanup()
     except Exception as e:
-        print(f"\nFATAL ERROR in main execution block: {e}", file=sys.stderr, flush=True)
-        print(traceback.format_exc(), file=sys.stderr, flush=True)
+        print(f"\nFATAL ERROR in main execution block: {e}", file=sys.stderr, flush=True) # DEBUG + flush
+        print(traceback.format_exc(), file=sys.stderr, flush=True) # DEBUG + flush
         # Attempt cleanup even on fatal error
         if 'emigo' in locals() and emigo:
             try:
                 emigo.cleanup()
             except Exception as cleanup_err:
-                print(f"Error during cleanup: {cleanup_err}", file=sys.stderr, flush=True)
+                print(f"Error during cleanup: {cleanup_err}", file=sys.stderr, flush=True) # DEBUG + flush
                 sys.exit(1) # Exit with error code
     finally:
         print("emigo.py main execution finished.", file=sys.stderr, flush=True) # DEBUG + flush
