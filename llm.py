@@ -9,7 +9,7 @@ API calls, streaming responses, and basic configuration (model name, API keys,
 base URLs).
 
 Note: This client is designed to be stateless regarding chat history. The
-calling process (e.g., `llm_worker.py`) is responsible for managing and
+calling process (e.g., `worker.py`) is responsible for managing and
 passing the complete message history for each API call.
 """
 
@@ -254,7 +254,7 @@ class LLMClient:
                 return raw_chunk_stream() # Return the generator yielding full chunks
             else:
                 # For non-streaming, return the raw response object
-                # The caller (llm_worker) will parse content or tool calls
+                # The caller (worker) will parse content or tool calls
                 return response # Return the whole LiteLLM response object
 
         # Keep exception handling for non-streaming calls or errors *before* streaming starts

@@ -55,10 +55,10 @@ class Emigo:
         self.sessions: Dict[str, Context] = {} # Key: session_path, Value: Context object
 
         # --- Worker Process Management ---
-        self.llm_worker_process: Optional[subprocess.Popen] = None
-        self.llm_worker_reader_thread: Optional[threading.Thread] = None
-        self.llm_worker_stderr_thread: Optional[threading.Thread] = None
-        self.llm_worker_lock = threading.Lock()
+        self.worker_process: Optional[subprocess.Popen] = None
+        self.worker_reader_thread: Optional[threading.Thread] = None
+        self.worker_stderr_thread: Optional[threading.Thread] = None
+        self.worker_lock = threading.Lock()
         self.worker_output_queue = queue.Queue() # Messages from worker stdout
         self.active_interaction_session: Optional[str] = None # Track which session is currently interacting
 
@@ -72,13 +72,6 @@ class Emigo:
         except Exception as e:
             print(f"Emigo __init__: ERROR creating Python EPC server: {e}\n{traceback.format_exc()}", file=sys.stderr, flush=True) # DEBUG + flush
             sys.exit(1)
-
-        # ch = logging.FileHandler(filename=os.path.join(emigo_config_dir, 'epc_log.txt'), mode='w')
-        # formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(lineno)04d | %(message)s')
-        # ch.setFormatter(formatter)
-        # ch.setLevel(logging.DEBUG)
-        # self.server.logger.addHandler(ch)
-        # self.server.logger = logger # Keep logging setup if needed
 
         print("Emigo __init__: Registering instance methods with Python EPC server...", file=sys.stderr, flush=True) # DEBUG + flush
         self.server.register_instance(self)  # register instance functions let elisp side call
@@ -101,26 +94,26 @@ class Emigo:
             sys.exit(1) # Exit if server thread fails
 
         # Start the worker process
-        print("Emigo __init__: Starting LLM worker process...", file=sys.stderr, flush=True) # DEBUG + flush
-        self._start_llm_worker()
+        print("Emigo __init__: Starting Worker process...", file=sys.stderr, flush=True) # DEBUG + flush
+        self._start_worker()
         # Check if worker started successfully
         worker_ok = False
-        with self.llm_worker_lock: # Ensure check happens after potential start attempt
-            if self.llm_worker_process and self.llm_worker_process.poll() is None:
+        with self.worker_lock: # Ensure check happens after potential start attempt
+            if self.worker_process and self.worker_process.poll() is None:
                 worker_ok = True
 
         if not worker_ok:
-            print("Emigo __init__: ERROR - LLM worker process failed to start or exited immediately.", file=sys.stderr, flush=True)
+            print("Emigo __init__: ERROR - Worker process failed to start or exited immediately.", file=sys.stderr, flush=True)
             # Attempt to read stderr if process object exists
-            if self.llm_worker_process and self.llm_worker_process.stderr:
+            if self.worker_process and self.worker_process.stderr:
                 try:
-                    stderr_output = self.llm_worker_process.stderr.read()
+                    stderr_output = self.worker_process.stderr.read()
                     print(f"Emigo __init__: Worker stderr upon exit:\n{stderr_output}", file=sys.stderr, flush=True)
                 except Exception as read_err:
                     print(f"Emigo __init__: Error reading worker stderr after exit: {read_err}", file=sys.stderr, flush=True)
                     sys.exit(1) # Exit if worker failed
 
-        print("Emigo __init__: LLM worker process started successfully.", file=sys.stderr, flush=True) # DEBUG + flush
+        print("Emigo __init__: Worker process started successfully.", file=sys.stderr, flush=True) # DEBUG + flush
 
 
         self.worker_processor_thread = threading.Thread(target=self._process_worker_queue, name="WorkerQueueProcessorThread", daemon=True)
@@ -146,20 +139,20 @@ class Emigo:
 
     # --- Worker Process Management ---
 
-    def _start_llm_worker(self):
-        """Starts the llm_worker.py subprocess."""
-        with self.llm_worker_lock:
-            if self.llm_worker_process and self.llm_worker_process.poll() is None:
-                print("LLM worker process already running.", file=sys.stderr)
+    def _start_worker(self):
+        """Starts the worker.py subprocess."""
+        with self.worker_lock:
+            if self.worker_process and self.worker_process.poll() is None:
+                print("Worker process already running.", file=sys.stderr)
                 return # Already running
 
-            worker_script = os.path.join(os.path.dirname(__file__), "llm_worker.py")
+            worker_script = os.path.join(os.path.dirname(__file__), "worker.py")
             python_executable = sys.executable # Use the same python interpreter
             worker_script_path = os.path.abspath(worker_script)
 
             try:
-                print(f"_start_llm_worker: Starting LLM worker process: {python_executable} {worker_script_path}", file=sys.stderr, flush=True) # DEBUG + flush
-                self.llm_worker_process = subprocess.Popen(
+                print(f"_start_worker: Starting Worker process: {python_executable} {worker_script_path}", file=sys.stderr, flush=True) # DEBUG + flush
+                self.worker_process = subprocess.Popen(
                     [python_executable, worker_script_path],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -174,76 +167,76 @@ class Emigo:
                 )
                 # Brief pause to see if process exits immediately
                 time.sleep(0.5) # Increased sleep time
-                if self.llm_worker_process.poll() is not None:
-                    print(f"_start_llm_worker: ERROR - LLM worker process exited immediately with code {self.llm_worker_process.poll()}.", file=sys.stderr, flush=True)
+                if self.worker_process.poll() is not None:
+                    print(f"_start_worker: ERROR - Worker process exited immediately with code {self.worker_process.poll()}.", file=sys.stderr, flush=True)
                     # Try reading stderr quickly
                     try:
-                        stderr_output = self.llm_worker_process.stderr.read() if self.llm_worker_process.stderr else "N/A"
-                        print(f"_start_llm_worker: Worker stderr upon exit:\n{stderr_output}", file=sys.stderr, flush=True)
+                        stderr_output = self.worker_process.stderr.read() if self.worker_process.stderr else "N/A"
+                        print(f"_start_worker: Worker stderr upon exit:\n{stderr_output}", file=sys.stderr, flush=True)
                     except Exception as read_err:
-                        print(f"_start_llm_worker: Error reading worker stderr after exit: {read_err}", file=sys.stderr, flush=True)
+                        print(f"_start_worker: Error reading worker stderr after exit: {read_err}", file=sys.stderr, flush=True)
 
                     # Regardless of stderr read success, set process to None and notify Emacs
-                    exit_code = self.llm_worker_process.poll() # Get exit code again just in case
-                    self.llm_worker_process = None
-                    message_emacs(f"Error: LLM worker process failed to start (exit code {exit_code}). Check *Messages* or Emigo process buffer.")
+                    exit_code = self.worker_process.poll() # Get exit code again just in case
+                    self.worker_process = None
+                    message_emacs(f"Error: Worker process failed to start (exit code {exit_code}). Check *Messages* or Emigo process buffer.")
                     return # Exit the function
 
-                print(f"_start_llm_worker: LLM worker started (PID: {self.llm_worker_process.pid}).", file=sys.stderr, flush=True) # DEBUG + flush
+                print(f"_start_worker: Worker started (PID: {self.worker_process.pid}).", file=sys.stderr, flush=True) # DEBUG + flush
 
                 # Create and start the stdout reader thread *after* process starts
-                print("_start_llm_worker: Starting stdout reader thread...", file=sys.stderr, flush=True) # DEBUG + flush
-                self.llm_worker_reader_thread = threading.Thread(target=self._read_worker_stdout, name="WorkerStdoutReader", daemon=True)
-                self.llm_worker_reader_thread.start()
-                if not self.llm_worker_reader_thread.is_alive(): # DEBUG + flush
-                    print("_start_llm_worker: ERROR - stdout reader thread failed to start.", file=sys.stderr, flush=True) # DEBUG + flush
+                print("_start_worker: Starting stdout reader thread...", file=sys.stderr, flush=True) # DEBUG + flush
+                self.worker_reader_thread = threading.Thread(target=self._read_worker_stdout, name="WorkerStdoutReader", daemon=True)
+                self.worker_reader_thread.start()
+                if not self.worker_reader_thread.is_alive(): # DEBUG + flush
+                    print("_start_worker: ERROR - stdout reader thread failed to start.", file=sys.stderr, flush=True) # DEBUG + flush
                     # Attempt to stop worker if it's running
-                    if self.llm_worker_process and self.llm_worker_process.poll() is None:
-                        self.llm_worker_process.terminate()
-                        self.llm_worker_process = None
+                    if self.worker_process and self.worker_process.poll() is None:
+                        self.worker_process.terminate()
+                        self.worker_process = None
                     return
 
-                print("_start_llm_worker: Starting stderr reader thread...", file=sys.stderr, flush=True) # DEBUG + flush
-                self.llm_worker_stderr_thread = threading.Thread(target=self._read_worker_stderr, name="WorkerStderrReader", daemon=True)
-                self.llm_worker_stderr_thread.start()
-                if not self.llm_worker_stderr_thread.is_alive(): # DEBUG + flush
-                    print("_start_llm_worker: ERROR - stderr reader thread failed to start.", file=sys.stderr, flush=True)
+                print("_start_worker: Starting stderr reader thread...", file=sys.stderr, flush=True) # DEBUG + flush
+                self.worker_stderr_thread = threading.Thread(target=self._read_worker_stderr, name="WorkerStderrReader", daemon=True)
+                self.worker_stderr_thread.start()
+                if not self.worker_stderr_thread.is_alive(): # DEBUG + flush
+                    print("_start_worker: ERROR - stderr reader thread failed to start.", file=sys.stderr, flush=True)
                     # Attempt cleanup
-                    if self.llm_worker_process and self.llm_worker_process.poll() is None:
-                        self.llm_worker_process.terminate()
-                        self.llm_worker_process = None
+                    if self.worker_process and self.worker_process.poll() is None:
+                        self.worker_process.terminate()
+                        self.worker_process = None
                     return
 
-                print("_start_llm_worker: Worker process and reader threads seem to be started.", file=sys.stderr, flush=True)
+                print("_start_worker: Worker process and reader threads seem to be started.", file=sys.stderr, flush=True)
 
             except Exception as e:
-                print(f"_start_llm_worker: Failed to start LLM worker: {e}\n{traceback.format_exc()}", file=sys.stderr, flush=True)
-                self.llm_worker_process = None
+                print(f"_start_worker: Failed to start Worker: {e}\n{traceback.format_exc()}", file=sys.stderr, flush=True)
+                self.worker_process = None
                 # Optionally notify Emacs of the failure
-                message_emacs(f"Error: Failed to start LLM worker subprocess: {e}")
+                message_emacs(f"Error: Failed to start Worker subprocess: {e}")
 
-    def _stop_llm_worker(self):
-        """Stops the LLM worker subprocess and reader threads."""
-        with self.llm_worker_lock:
-            if self.llm_worker_process:
-                print("Stopping LLM worker process...", file=sys.stderr)
-                if self.llm_worker_process.poll() is None: # Check if still running
+    def _stop_worker(self):
+        """Stops the Worker subprocess and reader threads."""
+        with self.worker_lock:
+            if self.worker_process:
+                print("Stopping Worker process...", file=sys.stderr)
+                if self.worker_process.poll() is None: # Check if still running
                     try:
                         # Try closing stdin first to signal worker
-                        if self.llm_worker_process.stdin:
-                            self.llm_worker_process.stdin.close()
+                        if self.worker_process.stdin:
+                            self.worker_process.stdin.close()
                     except OSError:
                         pass # Ignore errors if already closed
                     try:
-                        self.llm_worker_process.terminate() # Ask nicely first
-                        self.llm_worker_process.wait(timeout=2) # Wait a bit
+                        self.worker_process.terminate() # Ask nicely first
+                        self.worker_process.wait(timeout=2) # Wait a bit
                     except subprocess.TimeoutExpired:
-                        print("LLM worker did not terminate gracefully, killing.", file=sys.stderr)
-                        self.llm_worker_process.kill() # Force kill
+                        print("Worker did not terminate gracefully, killing.", file=sys.stderr)
+                        self.worker_process.kill() # Force kill
                     except Exception as e:
-                        print(f"Error stopping LLM worker: {e}", file=sys.stderr)
-                        self.llm_worker_process = None # Ensure process is marked as None
-                        print("LLM worker process stopped.", file=sys.stderr)
+                        print(f"Error stopping Worker: {e}", file=sys.stderr)
+                        self.worker_process = None # Ensure process is marked as None
+                        print("Worker process stopped.", file=sys.stderr)
 
             # Signal and wait for the queue processor thread to finish
             if hasattr(self, 'worker_processor_thread') and self.worker_processor_thread and self.worker_processor_thread.is_alive():
@@ -257,7 +250,7 @@ class Emigo:
     def _read_worker_stdout(self):
         """Reads stdout lines from the worker and puts them in a queue."""
         # Use a loop that checks if the process is alive
-        proc = self.llm_worker_process # Local reference
+        proc = self.worker_process # Local reference
         if proc and proc.stdout:
             try:
                 for line in iter(proc.stdout.readline, ''):
@@ -265,14 +258,14 @@ class Emigo:
                         self.worker_output_queue.put(line.strip())
                     else:
                         # Empty string indicates EOF (stream closed)
-                        print("LLM worker stdout stream ended (EOF).", file=sys.stderr)
+                        print("Worker stdout stream ended (EOF).", file=sys.stderr)
                         break
             except ValueError as e:
                 # Catch ValueError: I/O operation on closed file.
-                print(f"Error reading from LLM worker stdout (stream likely closed): {e}", file=sys.stderr)
+                print(f"Error reading from Worker stdout (stream likely closed): {e}", file=sys.stderr)
             except Exception as e:
                 # Handle other exceptions during read
-                print(f"Error reading from LLM worker stdout: {e}", file=sys.stderr)
+                print(f"Error reading from Worker stdout: {e}", file=sys.stderr)
             finally:
                 # Ensure the sentinel is put even if errors occur or loop finishes
                 print("Signaling end of worker output.", file=sys.stderr)
@@ -285,7 +278,7 @@ class Emigo:
     def _read_worker_stderr(self):
         """Reads and prints stderr lines from the worker."""
         # Use a loop that checks if the process is alive
-        proc = self.llm_worker_process # Local reference
+        proc = self.worker_process # Local reference
         if proc and proc.stderr:
             try:
                 for line in iter(proc.stderr.readline, ''):
@@ -294,57 +287,57 @@ class Emigo:
                         print(f"[WORKER_STDERR] {line.strip()}", file=sys.stderr, flush=True)
                     else:
                         # Empty string indicates EOF
-                        print("LLM worker stderr stream ended (EOF).", file=sys.stderr)
+                        print("Worker stderr stream ended (EOF).", file=sys.stderr)
                         break
             except ValueError as e:
                 # Catch ValueError: I/O operation on closed file.
-                print(f"Error reading from LLM worker stderr (stream likely closed): {e}", file=sys.stderr)
+                print(f"Error reading from Worker stderr (stream likely closed): {e}", file=sys.stderr)
             except Exception as e:
-                print(f"Error reading from LLM worker stderr: {e}", file=sys.stderr)
+                print(f"Error reading from Worker stderr: {e}", file=sys.stderr)
         else:
             print("Worker process or stderr not available for reading.", file=sys.stderr)
 
     def _send_to_worker(self, data: Dict):
         """Sends a JSON message to the worker's stdin."""
-        with self.llm_worker_lock:
-            if not self.llm_worker_process or self.llm_worker_process.poll() is not None:
+        with self.worker_lock:
+            if not self.worker_process or self.worker_process.poll() is not None:
                 print("Cannot send to worker, process not running. Attempting restart...", file=sys.stderr)
-                self._start_llm_worker() # Try restarting
-                if not self.llm_worker_process:
+                self._start_worker() # Try restarting
+                if not self.worker_process:
                     print("Worker restart failed. Cannot send message.", file=sys.stderr)
                     # Notify Emacs about the failure
                     session = data.get("session", "unknown")
-                    eval_in_emacs("emigo--flush-buffer", session, "[Error: LLM worker process is not running]", "error")
+                    eval_in_emacs("emigo--flush-buffer", session, "[Error: Worker process is not running]", "error")
                     return
 
-            if self.llm_worker_process and self.llm_worker_process.stdin:
+            if self.worker_process and self.worker_process.stdin:
                 try:
                     json_str = json.dumps(data) + '\n' # Add newline separator
                     # print(f"Sending to worker: {json_str.strip()}", file=sys.stderr) # Debug
-                    self.llm_worker_process.stdin.write(json_str)
-                    self.llm_worker_process.stdin.flush()
+                    self.worker_process.stdin.write(json_str)
+                    self.worker_process.stdin.flush()
                 except (OSError, BrokenPipeError, ValueError) as e: # Added ValueError for closed file
-                    print(f"Error sending to LLM worker (Pipe closed or invalid state): {e}", file=sys.stderr)
+                    print(f"Error sending to Worker (Pipe closed or invalid state): {e}", file=sys.stderr)
                     # Worker has likely crashed or exited. Stop tracking it.
-                    self._stop_llm_worker() # Attempt cleanup, might set self.llm_worker_process to None
+                    self._stop_worker() # Attempt cleanup, might set self.worker_process to None
                     # Notify Emacs about the failure
                     session = data.get("session", "unknown")
                     eval_in_emacs("emigo--flush-buffer", session, f"[Error: Failed to send message to worker ({e})]", "error")
                 except Exception as e:
-                    print(f"Unexpected error sending to LLM worker: {e}", file=sys.stderr)
+                    print(f"Unexpected error sending to Worker: {e}", file=sys.stderr)
                     # Also notify Emacs
                     session = data.get("session", "unknown")
                     eval_in_emacs("emigo--flush-buffer", session, f"[Error: Unexpected error sending message to worker ({e})]", "error")
-            elif not self.llm_worker_process: # Check if process is None
+            elif not self.worker_process: # Check if process is None
                  print("Cannot send to worker, process is not running.", file=sys.stderr)
                  # Notify Emacs
                  session = data.get("session", "unknown")
-                 eval_in_emacs("emigo--flush-buffer", session, "[Error: LLM worker process is not running]", "error")
+                 eval_in_emacs("emigo--flush-buffer", session, "[Error: Worker process is not running]", "error")
             else: # Process exists but stdin might be closed
                  print("Cannot send to worker, stdin not available or closed.", file=sys.stderr)
                  # Notify Emacs
                  session = data.get("session", "unknown")
-                 eval_in_emacs("emigo--flush-buffer", session, "[Error: Cannot write to LLM worker process]", "error")
+                 eval_in_emacs("emigo--flush-buffer", session, "[Error: Cannot write to Worker process]", "error")
 
 
     def _process_worker_queue(self):
@@ -663,8 +656,8 @@ class Emigo:
             # Or False? Let's return False as no cancellation *action* was performed.
             return False
 
-        print("Stopping and restarting LLM worker due to cancellation request...", file=sys.stderr) # DEBUG
-        self._stop_llm_worker() # Stops process and queue processor thread
+        print("Stopping and restarting Worker due to cancellation request...", file=sys.stderr) # DEBUG
+        self._stop_worker() # Stops process and queue processor thread
 
         # Drain the queue *after* stopping the old processor thread
         print("Draining worker output queue...", file=sys.stderr) # DEBUG
@@ -686,22 +679,22 @@ class Emigo:
         print(f"Worker output queue drained ({drained_count} messages discarded).", file=sys.stderr) # DEBUG
 
         # Restart the worker process
-        self._start_llm_worker() # Starts process and reader threads
+        self._start_worker() # Starts process and reader threads
 
         # Check if worker restart was successful before proceeding
         worker_restarted_ok = False
-        with self.llm_worker_lock:
-            if self.llm_worker_process and self.llm_worker_process.poll() is None:
+        with self.worker_lock:
+            if self.worker_process and self.worker_process.poll() is None:
                 worker_restarted_ok = True
 
         if not worker_restarted_ok:
-            print("ERROR: Failed to restart LLM worker after cancellation.", file=sys.stderr) # DEBUG
-            message_emacs("[Emigo Error] Failed to restart LLM worker after cancellation.")
+            print("ERROR: Failed to restart Worker after cancellation.", file=sys.stderr) # DEBUG
+            message_emacs("[Emigo Error] Failed to restart Worker after cancellation.")
             # Clear active session state even on failure
             self.active_interaction_session = None
             return False # Indicate failure
 
-        print("LLM worker restarted successfully.", file=sys.stderr) # DEBUG
+        print("Worker restarted successfully.", file=sys.stderr) # DEBUG
 
         # --- Restart the worker queue processor thread ---
         print("Restarting worker queue processor thread...", file=sys.stderr) # DEBUG
@@ -711,7 +704,7 @@ class Emigo:
             print("ERROR: Failed to restart worker queue processor thread.", file=sys.stderr) # DEBUG
             message_emacs("[Emigo Error] Failed to restart worker queue processor thread.")
             # Stop the worker again if the processor fails
-            self._stop_llm_worker()
+            self._stop_worker()
             self.active_interaction_session = None
             return False # Indicate failure
         print("Worker queue processor thread restarted.", file=sys.stderr) # DEBUG
@@ -754,7 +747,7 @@ class Emigo:
     def cleanup(self):
         """Do some cleanup before exit python process."""
         print("Running Emigo cleanup...", file=sys.stderr) # DEBUG
-        self._stop_llm_worker()
+        self._stop_worker()
         close_epc_client()
         print("Emigo cleanup finished.", file=sys.stderr) # DEBUG
 
@@ -792,9 +785,9 @@ if __name__ == "__main__":
                  print("ERROR: Python EPC server thread has died. Exiting.", file=sys.stderr, flush=True)
                  break # Exit the loop if server thread dies
             # Check if worker process is alive (optional, might restart automatically)
-            # with emigo.llm_worker_lock:
-            #     if emigo.llm_worker_process and emigo.llm_worker_process.poll() is not None:
-            #         print("Warning: LLM worker process seems to have died.", file=sys.stderr, flush=True)
+            # with emigo.worker_lock:
+            #     if emigo.worker_process and emigo.worker_process.poll() is not None:
+            #         print("Warning: Worker process seems to have died.", file=sys.stderr, flush=True)
             #         # Consider attempting restart here or letting _send_to_worker handle it
             time.sleep(5) # Check every 5 seconds
 

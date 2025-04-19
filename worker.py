@@ -10,7 +10,7 @@ import traceback
 import os
 import importlib
 import warnings
-from typing import List, Dict, Optional, Union, Iterator, Any # Add Any
+from typing import List, Dict, Optional, Union, Iterator
 
 import tiktoken # For token counting
 
@@ -578,13 +578,6 @@ def main():
             request = json.loads(line)
             if request.get("type") == "interaction_request":
                 handle_interaction_request(request.get("data"))
-            elif request.get("type") == "get_context_response":
-                # This is handled by the request_context function's loop
-                pass
-            elif request.get("type") == "ping": # Example control message
-                send_message("pong", request.get("session", "control"))
-            elif request.get("type") == "tool_result":
-                print(f"Worker ignoring unexpected tool_result message: {line.strip()}", file=sys.stderr)
             else:
                 print(f"Worker received unknown message type: {request.get('type')}", file=sys.stderr)
 
