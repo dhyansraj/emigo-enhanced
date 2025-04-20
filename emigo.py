@@ -162,7 +162,6 @@ class Emigo:
         with self.worker_lock:
             proc = self.worker_process
             if proc and proc.poll() is None: # Check if running
-                # print("Stopping Worker process...", file=sys.stderr) # Optional debug
                 try:
                     if proc.stdin:
                         proc.stdin.close() # Signal worker
@@ -177,12 +176,10 @@ class Emigo:
                     print(f"Error during worker termination: {e}", file=sys.stderr)
                 finally:
                     self.worker_process = None # Mark as stopped regardless of errors
-                    # print("Worker process stopped.", file=sys.stderr) # Optional debug
 
             # Stop queue processor thread
             q_thread = getattr(self, 'worker_processor_thread', None)
             if q_thread and q_thread.is_alive():
-                # print("Stopping worker queue processor thread...", file=sys.stderr) # Optional debug
                 try:
                     self.worker_output_queue.put(None) # Signal loop to exit
                     q_thread.join(timeout=1) # Shorter timeout
@@ -203,10 +200,8 @@ class Emigo:
                     if line:
                         self.worker_output_queue.put(line.strip())
                     else: # Empty string indicates EOF
-                        # print("Worker stdout stream ended (EOF).", file=sys.stderr) # Optional debug
                         break
             except ValueError: # I/O operation on closed file
-                # print("Worker stdout stream closed.", file=sys.stderr) # Optional debug
                 pass
             except Exception as e:
                 print(f"Error reading Worker stdout: {e}", file=sys.stderr)
@@ -214,7 +209,6 @@ class Emigo:
                 # Ensure the sentinel is always put to signal the processor thread
                 self.worker_output_queue.put(None)
         else:
-            # print("Worker process or stdout not available for reading.", file=sys.stderr) # Optional debug
             # Still signal end if the thread was started but process died quickly
             self.worker_output_queue.put(None)
 
@@ -230,15 +224,11 @@ class Emigo:
                         # Print worker errors clearly marked, keep this logging
                         print(f"[WORKER_STDERR] {line.strip()}", file=sys.stderr, flush=True)
                     else: # Empty string indicates EOF
-                        # print("Worker stderr stream ended (EOF).", file=sys.stderr) # Optional debug
                         break
             except ValueError: # I/O operation on closed file
-                # print("Worker stderr stream closed.", file=sys.stderr) # Optional debug
                 pass
             except Exception as e:
                 print(f"Error reading Worker stderr: {e}", file=sys.stderr)
-        # else: # Optional debug
-            # print("Worker process or stderr not available for reading.", file=sys.stderr)
 
     def _send_to_worker(self, data: Dict):
         """Sends a JSON message to the worker's stdin."""
@@ -257,7 +247,6 @@ class Emigo:
             if self.worker_process and self.worker_process.stdin:
                 try:
                     json_str = json.dumps(data) + '\n'
-                    # print(f"Sending to worker: {json_str.strip()}", file=sys.stderr) # Optional debug
                     self.worker_process.stdin.write(json_str)
                     self.worker_process.stdin.flush()
                 except (OSError, BrokenPipeError, ValueError) as e: # Catches pipe errors and closed file errors
@@ -290,7 +279,6 @@ class Emigo:
                     print(f"Worker message missing session path: {line}", file=sys.stderr)
                     continue
 
-                # print(f"Processing worker message type '{msg_type}' for {session_path}", file=sys.stderr) # Optional debug
 
                 if msg_type == "stream":
                     role = message.get("role", "llm")
@@ -303,7 +291,6 @@ class Emigo:
                 elif msg_type == "finished":
                     status = message.get("status", "unknown")
                     finish_message = message.get("message", "")
-                    # print(f"Worker finished interaction for {session_path}. Status: {status}. Message: {finish_message}", file=sys.stderr) # Optional debug
 
                     # Clear active session flag *before* signaling Emacs
                     if self.active_interaction_session == session_path:
@@ -334,7 +321,6 @@ class Emigo:
                         self.active_interaction_session = None
 
                 elif msg_type == "pong":
-                    # print(f"Received pong from worker for session: {session_path}", file=sys.stderr) # Optional debug
                     pass # No action needed for pong currently
 
                 # Handle other message types if needed
@@ -356,7 +342,6 @@ class Emigo:
             return None
 
         if session_path not in self.sessions:
-            # print(f"Creating new context object for: {session_path}", file=sys.stderr) # Optional debug
             # TODO: Get verbose setting properly if needed, defaulting to False for now
             config_verbose = False # Placeholder
             self.sessions[session_path] = Context(session_path=session_path, verbose=config_verbose)
@@ -413,18 +398,15 @@ class Emigo:
         # --- Pre-Interaction Checks ---
         if self.active_interaction_session:
             active_session = self.active_interaction_session # Cache locally
-            # print(f"Interaction already active for session {active_session}. Asking user.", file=sys.stderr) # Optional debug
             try:
                 confirm_cancel = get_emacs_func_result("yes-or-no-p",
                                                        f"LLM is busy with '{active_session}'. Stop it and run new prompt for '{session_path}'?")
                 if confirm_cancel:
-                    # print(f"User confirmed cancellation of {active_session}.", file=sys.stderr) # Optional debug
                     if not self.cancel_llm_interaction(active_session):
                         message_emacs("[Emigo Error] Failed to cancel previous interaction.")
                         return # Stop if cancellation failed
                     # Proceed after successful cancellation
                 else:
-                    # print(f"User declined cancellation. Ignoring new prompt for {session_path}.", file=sys.stderr) # Optional debug
                     eval_in_emacs("message", f"[Emigo] LLM busy with {active_session}. New prompt ignored.")
                     return # Stop processing the new request
             except Exception as e:
@@ -435,7 +417,6 @@ class Emigo:
         # --- Prepare Interaction ---
         # Mark the *new* session as active *before* potentially failing operations.
         self.active_interaction_session = session_path
-        # print(f"Set active interaction session to: {self.active_interaction_session}", file=sys.stderr) # Optional debug
 
         context = self._get_or_create_context(session_path)
         if not context:
@@ -451,7 +432,6 @@ class Emigo:
         user_prompt_dict = {"role": "user", "content": prompt}
 
         # Generate context string (handles @file mentions internally)
-        # print(f"Generating context string for {session_path}...", file=sys.stderr) # Optional debug
         context_str = context.generate_context_string(current_prompt=prompt)
 
         # --- Prepare data for worker ---
@@ -506,7 +486,6 @@ class Emigo:
         print("--- End Prompt Components ---", file=sys.stderr, flush=True)
 
         # --- Send request to worker ---
-        # print(f"Sending interaction request to worker for {context.session_path}", file=sys.stderr) # Optional debug
         self._send_to_worker({
             "type": "interaction_request",
             "session_path": context.session_path, # Include session path at top level too
@@ -524,7 +503,6 @@ class Emigo:
             new_history_list: The list of message dictionaries to set as the new history.
             user_prompt_dict: The dictionary representing the final user message (the prompt).
         """
-        # print(f"Received set_history_and_send for session: {session_path}", file=sys.stderr) # Optional debug
 
         # Attempt conversion from potential Elisp alists
         converted_history = _try_convert_alist_to_dict(new_history_list)
@@ -544,7 +522,6 @@ class Emigo:
             return
 
         # Set the history in the context object
-        # print(f"Setting history for {session_path} with {len(converted_history)} messages.", file=sys.stderr) # Optional debug
         context.set_history(converted_history)
 
         # Extract the prompt string
@@ -554,7 +531,6 @@ class Emigo:
              return
 
         # Call the standard emigo_send method
-        # print(f"Calling emigo_send after setting history for {session_path}", file=sys.stderr) # Optional debug
         self.emigo_send(session_path, prompt_string)
 
 
@@ -566,16 +542,13 @@ class Emigo:
         Returns:
             bool: True if cancellation (including worker restart) was successful, False otherwise.
         """
-        # print(f"Received request to cancel interaction for session: {session_path}", file=sys.stderr) # Optional debug
         if self.active_interaction_session != session_path:
             # message_emacs(f"No active interaction found for session {session_path} to cancel.") # Optional
             return False # No active interaction for this session to cancel
 
-        # print("Stopping and restarting Worker due to cancellation...", file=sys.stderr) # Optional debug
         self._stop_worker() # Stops process and queue processor thread
 
         # Drain any remaining messages from the *old* worker run
-        # print("Draining worker output queue...", file=sys.stderr) # Optional debug
         drained_count = 0
         while not self.worker_output_queue.empty():
             try:
@@ -588,8 +561,6 @@ class Emigo:
             except Exception as e:
                 print(f"Error draining queue during cancel: {e}", file=sys.stderr)
                 break # Stop draining on error
-        # if drained_count > 0: # Optional debug
-            # print(f"Worker output queue drained ({drained_count} messages discarded).", file=sys.stderr)
 
         # Restart the worker process and its reader threads
         self._start_worker()
@@ -606,10 +577,8 @@ class Emigo:
             self.active_interaction_session = None # Clear flag even on failure
             return False
 
-        # print("Worker restarted successfully.", file=sys.stderr) # Optional debug
 
         # Restart the worker queue processor thread
-        # print("Restarting worker queue processor thread...", file=sys.stderr) # Optional debug
         self.worker_processor_thread = threading.Thread(target=self._process_worker_queue, name="WorkerQueueProcessorThread", daemon=True)
         self.worker_processor_thread.start()
         if not self.worker_processor_thread.is_alive():
@@ -618,18 +587,13 @@ class Emigo:
             self._stop_worker() # Stop worker again if processor fails
             self.active_interaction_session = None
             return False
-        # print("Worker queue processor thread restarted.", file=sys.stderr) # Optional debug
 
         # --- Post-Cancellation State Updates ---
         context = self.sessions.get(session_path)
         if context:
-            # print(f"Invalidating cache for cancelled context: {session_path}", file=sys.stderr) # Optional debug
             context.invalidate_cache()
-        # else: # Optional debug
-            # print(f"Warning: Could not find context {session_path} to invalidate cache after cancellation.", file=sys.stderr)
 
         # Clear active context state *after* successful restart
-        # print(f"Clearing active interaction flag (was {self.active_interaction_session}).", file=sys.stderr) # Optional debug
         self.active_interaction_session = None
 
         # Notify Emacs buffer
@@ -647,7 +611,6 @@ class Emigo:
 
     def clear_history(self, session_path: str) -> bool:
         """EPC: Clear the chat history for the given session path."""
-        # print(f"Clearing history for session: {session_path}", file=sys.stderr) # Optional debug
         context = self.sessions.get(session_path) # Use get, don't create
         if context:
             context.clear_history()
@@ -701,7 +664,6 @@ def _try_convert_alist_to_dict(data):
 
 
 if __name__ == "__main__":
-    # print("emigo.py starting execution...", file=sys.stderr, flush=True) # Optional debug
     if len(sys.argv) < 2:
         print("ERROR: Missing Elisp EPC server port argument.", file=sys.stderr, flush=True)
         sys.exit(1)
@@ -709,22 +671,15 @@ if __name__ == "__main__":
     emigo_instance = None # Define outside try block for cleanup access
     exit_code = 1 # Default exit code in case of early failure
     try:
-        # print("Initializing Emigo class...", file=sys.stderr, flush=True) # Optional debug
         emigo_instance = Emigo(sys.argv[1:])
-        # print("Emigo class initialized.", file=sys.stderr, flush=True) # Optional debug
 
         # Keep the main thread alive. The EPC server runs in a daemon thread.
         # We just need to wait for an interruption signal (like Ctrl+C).
-        # print("Main thread waiting for KeyboardInterrupt (Ctrl+C)...", file=sys.stderr, flush=True) # Optional debug
         while True:
             # Check if the EPC server thread is still alive periodically
             if not emigo_instance.server_thread.is_alive():
                  print("ERROR: Python EPC server thread has died. Exiting.", file=sys.stderr, flush=True)
                  break # Exit the loop if server thread dies
-            # Optional: Check worker health periodically, though restart is handled on send/cancel
-            # with emigo_instance.worker_lock:
-            #     if emigo_instance.worker_process and emigo_instance.worker_process.poll() is not None:
-            #         print("Warning: Worker process seems to have died.", file=sys.stderr, flush=True)
             time.sleep(5) # Reduce CPU usage
 
     except KeyboardInterrupt:
