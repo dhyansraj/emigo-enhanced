@@ -8,12 +8,8 @@ import json
 import time
 import traceback
 import os
-import importlib
-import warnings
-from typing import List, Dict, Optional, Union, Iterator
-
-# Filter out UserWarning from pydantic used by litellm
-warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+import warnings # Keep warnings for now if litellm still needs it, but remove filter
+from typing import List, Dict, Optional # Removed Union, Iterator
 
 # Import necessary components
 from utils import _filter_context, get_os_name
@@ -76,7 +72,7 @@ You accomplish a given task by:
 
 # --- Build System Prompt Function ---
 
-def _build_system_prompt(session_path: str, model_name: str) -> str:
+def _build_system_prompt(session_path: str) -> str:
     """Builds the system prompt, inserting dynamic info."""
     session_dir = session_path
     os_name = get_os_name()
@@ -97,181 +93,143 @@ def send_message(msg_type, session_path, **kwargs):
     message = {"type": msg_type, "session": session_path, **kwargs}
     try:
         print(json.dumps(message), flush=True)
-    except TypeError as e:
-        # Handle potential non-serializable data in kwargs
-        print(json.dumps({
-            "type": "error",
-            "session": session_path,
-            "message": f"Serialization error: {e}. Data: {repr(kwargs)}"
-        }), flush=True)
-    except Exception as e:
-        print(json.dumps({
-            "type": "error",
-            "session": session_path,
-            "message": f"Error sending message: {e}"
-        }), flush=True)
+    except (TypeError, Exception) as e:
+        # Handle potential non-serializable data or other errors
+        error_data = {"type": "error", "session": session_path}
+        if isinstance(e, TypeError):
+            error_data["message"] = f"Serialization error: {e}. Data: {repr(kwargs)}"
+        else:
+            error_data["message"] = f"Error sending message: {e}"
+        print(json.dumps(error_data), flush=True)
 
 
 def handle_interaction_request(request_data):
     """Handles a single interaction request dictionary."""
     session_path = request_data.get("session_path")
     user_prompt_dict = request_data.get("user_prompt") # The original user prompt dict
-    history = request_data.get("history", []) # List of message dicts (already truncated)
+    history = request_data.get("history", [])
     config = request_data.get("config", {})
-    # chat_files_list = request_data.get("chat_files", []) # Still available if needed
-    context_str = request_data.get("context", "<context>\n# Error: Details not provided by main process.\n</context>")
+    context_str = request_data.get("context", "<context>\n# Error: Context not provided.\n</context>")
 
-    if not all([session_path, user_prompt_dict, isinstance(history, list)]):
-        send_message("error", session_path or "unknown", message=f"Worker received incomplete request data: {request_data}")
+    if not session_path or not user_prompt_dict:
+        send_message("error", session_path or "unknown", message=f"Worker received incomplete request: {list(request_data.keys())}")
         return
 
-    # --- Initialize LLM Client ---
     model_name = config.get("model")
-    api_key = config.get("api_key")
-    base_url = config.get("base_url")
-    verbose = config.get("verbose", False)
-
     if not model_name:
         send_message("error", session_path, message="Missing 'model' in config.")
         return
 
-    llm_client = LLMClient(
-        model_name=model_name,
-        api_key=api_key,
-        base_url=base_url,
-        verbose=verbose,
-    )
+    # --- Initialize LLM Client ---
+    try:
+        llm_client = LLMClient(
+            model_name=model_name,
+            api_key=config.get("api_key"),
+            base_url=config.get("base_url"),
+            verbose=config.get("verbose", False),
+        )
+    except Exception as e:
+        send_message("error", session_path, message=f"Failed to initialize LLMClient: {e}")
+        return
 
-    # --- Interaction Handling (Single Turn) ---
-    llm_error_occurred = False # Flag for critical LLM errors
+    # --- Interaction Handling ---
+    llm_error_occurred = False
+    full_response_text = ""
+    error_message_detail = ""
 
     try:
-        # 1. Build System Prompt
-        system_prompt = _build_system_prompt(session_path, llm_client.model_name)
-
-        # 2. Prepare messages for LLM
-        # Start with system prompt, add the received (truncated) history.
-        messages_to_send = [{"role": "system", "content": system_prompt}]
-        messages_to_send.extend(history) # Add the truncated history
-
-        # Create the final user message including the original prompt and the context string
+        # 1. Prepare messages
+        system_prompt = _build_system_prompt(session_path)
         final_user_content = user_prompt_dict.get("content", "") + f"\n\n{context_str}"
-        messages_to_send.append({"role": "user", "content": final_user_content})
+        messages_to_send = [
+            {"role": "system", "content": system_prompt},
+            *history, # Add truncated history
+            {"role": "user", "content": final_user_content}
+        ]
 
-        # 3. Call LLM
-        full_response_text = "" # Accumulate the textual response
-        turn_llm_error = False # Track error specifically for this LLM call
-
-        # Signal start of assistant response stream
+        # 2. Call LLM and stream response
         send_message("stream", session_path, role="llm", content="\nAssistant:\n")
-
         try:
-            # Prepare arguments for llm_client.send (no tools)
-            completion_args = {"stream": True}
-            response_stream = llm_client.send(messages_to_send, **completion_args)
+            response_stream = llm_client.send(messages_to_send, stream=True)
 
-            # Stream text chunks
             for chunk in response_stream:
-                # Check for stream error marker
-                if isinstance(chunk, dict) and chunk.get("_stream_error"):
-                    turn_llm_error = True
-                    llm_error_occurred = True # Mark global error flag
-                    error_message = f"[Error during LLM streaming: {chunk.get('error_message', 'Unknown stream error')}]"
-                    print(f"\n{error_message}", file=sys.stderr)
-                    send_message("stream", session_path, role="error", content=error_message)
-                    # Don't modify history here, error status will be sent in 'finished'
-                    break # Exit the stream processing loop
-
-                # Safely access delta
-                delta = None
+                delta_content = None
                 try:
-                    if chunk and hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
-                         if hasattr(chunk.choices[0], 'delta'):
-                             delta = chunk.choices[0].delta
-                except Exception as e:
-                    print(f"  - Error accessing chunk delta: {e}. Chunk: {chunk}", file=sys.stderr)
-                    continue
+                    # Simplified delta access
+                    if chunk and chunk.choices and chunk.choices[0].delta:
+                        delta_content = chunk.choices[0].delta.content
+                except (AttributeError, IndexError, TypeError) as e:
+                    # Log minor access errors but continue if possible
+                    print(f"  - Minor error accessing chunk delta: {e}. Chunk: {chunk}", file=sys.stderr)
+                    continue # Skip malformed chunk
 
-                if not delta: continue # Skip chunk if no delta
-
-                # Process text content
-                try:
-                    if hasattr(delta, 'content') and delta.content:
-                        content_piece = delta.content
-                        send_message("stream", session_path, role="llm", content=content_piece)
-                        full_response_text += content_piece
-                except Exception as e:
-                     print(f"  - Error processing delta.content: {e}. Delta: {delta}", file=sys.stderr)
-
-                # Tool call processing removed
+                if delta_content:
+                    send_message("stream", session_path, role="llm", content=delta_content)
+                    full_response_text += delta_content
 
         except Exception as e:
-            turn_llm_error = True
-            llm_error_occurred = True # Mark global error flag
-            error_message = f"[Error during LLM communication: {e}]\n{traceback.format_exc()}"
-            print(f"\n{error_message}", file=sys.stderr)
+            llm_error_occurred = True
+            error_message_detail = f"LLM communication error: {e}"
+            tb_str = traceback.format_exc()
+            print(f"\n[Error during LLM communication: {e}]\n{tb_str}", file=sys.stderr)
             send_message("stream", session_path, role="error", content=f"[LLM Error: {e}]")
-            # Don't modify history here, error status will be sent in 'finished'
 
         # --- Finalize Interaction ---
-        if turn_llm_error:
+        if llm_error_occurred:
             status = "llm_error"
-            finish_message = "Interaction ended due to LLM communication error."
-            finish_data = {
-                "status": status,
-                "message": finish_message
-            }
-        else: # Finished normally
+            finish_message = f"Interaction ended due to LLM error: {error_message_detail}"
+            finish_data = {"status": status, "message": finish_message}
+        else:
             status = "success"
             finish_message = "Interaction completed."
-            # Prepare the assistant response dictionary
             filtered_response_text = _filter_context(full_response_text.strip())
             assistant_response_dict = {"role": "assistant", "content": filtered_response_text}
             finish_data = {
                 "status": status,
                 "message": finish_message,
-                "original_user_prompt": user_prompt_dict, # Send back the original user prompt
-                "assistant_response": assistant_response_dict # Send back the assistant response
+                "original_user_prompt": user_prompt_dict,
+                "assistant_response": assistant_response_dict
             }
 
         send_message("finished", session_path, **finish_data)
 
     except Exception as e:
+        # Catch broader errors in the handler logic itself
         tb_str = traceback.format_exc()
         error_msg = f"Critical error in interaction handler: {e}\n{tb_str}"
         print(error_msg, file=sys.stderr)
+        # Ensure session_path is valid before sending final error messages
         valid_session_path = session_path or "unknown_session"
+        # Attempt to notify Emacs about the critical failure
         send_message("stream", valid_session_path, role="error", content=f"[Worker Critical Error: {e}]")
         send_message("finished", valid_session_path, status="critical_error", message=error_msg)
 
 def main():
     """Reads requests from stdin and handles them."""
-    # Indicate worker is ready (optional)
-    # print(json.dumps({"type": "status", "status": "ready"}), flush=True)
-
     while True:
         try:
             line = sys.stdin.readline()
             if not line:
-                # End of input, exit gracefully
-                # print(json.dumps({"type": "status", "status": "exiting", "reason": "stdin closed"}), flush=True)
-                break
+                break # End of input
 
             message = json.loads(line)
             if message.get("type") == "interaction_request":
                 handle_interaction_request(message.get("data"))
             else:
+                # Log unknown message types but don't crash
                 print(f"Worker received unknown message type: {message.get('type')}", file=sys.stderr)
 
-        except json.JSONDecodeError:
-            # Log error but try to continue reading
-            print(json.dumps({"type": "error", "session":"unknown", "message": f"Worker received invalid JSON: {line.strip()}"}), flush=True)
+        except json.JSONDecodeError as e:
+            print(f"Worker received invalid JSON: {line.strip()}. Error: {e}", file=sys.stderr)
+            # Send error back if possible, otherwise just log
+            send_message("error", "unknown", message=f"Worker received invalid JSON: {line.strip()}")
         except Exception as e:
-            # Log unexpected errors
+            # Log unexpected errors in the main loop
             tb_str = traceback.format_exc()
-            print(json.dumps({"type": "error", "session":"unknown", "message": f"Worker main loop error: {e}\n{tb_str}"}), flush=True)
-            # Depending on the error, might want to break or continue
-            time.sleep(1) # Avoid tight loop on persistent error
+            print(f"Worker main loop error: {e}\n{tb_str}", file=sys.stderr)
+            # Send error back if possible
+            send_message("error", "unknown", message=f"Worker main loop error: {e}")
+            time.sleep(0.1) # Avoid tight loop on persistent error
 
 if __name__ == "__main__":
     main()
