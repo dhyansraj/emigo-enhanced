@@ -624,12 +624,23 @@ class Emigo:
         """
         print(f"Received set_history_and_send for session: {session_path}", file=sys.stderr) # DEBUG
 
-        # Validate input types
-        if not isinstance(new_history_list, list):
-            message_emacs(f"[Emigo Error] Invalid history format received: {type(new_history_list)}")
+        converted_history_list = _try_convert_alist_to_dict(new_history_list)
+        converted_user_prompt_dict = _try_convert_alist_to_dict(user_prompt_dict)
+        print(f"Converted history list: {converted_history_list}", file=sys.stderr)
+        print(f"Converted user prompt dict: {converted_user_prompt_dict}", file=sys.stderr)
+
+
+        # Validate input types *after* conversion
+        if not isinstance(converted_history_list, list):
+            message_emacs(f"[Emigo Error] Invalid history format after conversion: {type(converted_history_list)}")
             return
-        if not isinstance(user_prompt_dict, dict) or user_prompt_dict.get("role") != "user":
-            message_emacs(f"[Emigo Error] Invalid user prompt format received: {user_prompt_dict}")
+        # Validate individual history items are dicts
+        if not all(isinstance(item, dict) for item in converted_history_list):
+             message_emacs(f"[Emigo Error] Invalid history item format after conversion: {[type(item) for item in converted_history_list]}")
+             return
+
+        if not isinstance(converted_user_prompt_dict, dict) or converted_user_prompt_dict.get("role") != "user":
+            message_emacs(f"[Emigo Error] Invalid user prompt format after conversion: {converted_user_prompt_dict}")
             return
 
         # Get context
@@ -638,12 +649,12 @@ class Emigo:
             eval_in_emacs("emigo--flush-buffer", f"invalid-context-{session_path}", f"[Error: Invalid context path '{session_path}']", "error")
             return
 
-        # Set the history in the context object
-        print(f"Setting history for context {session_path} with {len(new_history_list)} messages.", file=sys.stderr) # DEBUG
-        context.set_history(new_history_list)
+        # Set the history in the context object using the converted data
+        print(f"Setting history for context {session_path} with {len(converted_history_list)} messages.", file=sys.stderr) # DEBUG
+        context.set_history(converted_history_list)
 
-        # Extract the prompt string from the user prompt dictionary
-        prompt_string = user_prompt_dict.get("content", "")
+        # Extract the prompt string from the converted user prompt dictionary
+        prompt_string = converted_user_prompt_dict.get("content", "")
 
         # Call the standard emigo_send method to handle the interaction
         # This avoids duplicating the interaction setup logic.
@@ -757,6 +768,46 @@ class Emigo:
         else:
             message_emacs(f"No context found to clear history for: {session_path}")
             return False
+
+# --- Helper Functions ---
+
+def _try_convert_alist_to_dict(data):
+    """Attempts to convert Elisp alist representation(s) to Python dict(s).
+
+    Handles:
+    - Single alist: [[':key1', Symbol('.'), 'val1'], [':key2', Symbol('.'), 'val2']] -> {'key1': 'val1', 'key2': 'val2'}
+    - List of alists: [[[':k1', Symbol('.'), 'v1']], [[':k2', Symbol('.'), 'v2']]] -> [{'k1': 'v1'}, {'k2': 'v2'}]
+    - Already correct dicts/lists: Passes them through unchanged.
+    """
+    if isinstance(data, list):
+        # Check if it's a list of alist representations (list of lists of lists)
+        # Heuristic: Check if the first element looks like an alist representation
+        if data and isinstance(data[0], list) and data[0] and isinstance(data[0][0], list) and len(data[0][0]) == 3:
+             # It's likely a list of alists, convert each one
+             return [_try_convert_alist_to_dict(item) for item in data]
+        # Check if it's a single alist representation (list of lists)
+        # Heuristic: Check if the first element looks like an alist pair [':key', dot, val]
+        elif data and isinstance(data[0], list) and len(data[0]) == 3 and isinstance(data[0][0], str) and data[0][0].startswith(':'):
+             # It's likely a single alist, convert it to a dict
+             result_dict = {}
+             for item in data:
+                 # item is like [':key', Symbol('.'), 'value'] or similar
+                 if isinstance(item, list) and len(item) == 3 and isinstance(item[0], str) and item[0].startswith(':'):
+                     key = item[0][1:] # Remove the leading ':'
+                     value = item[2]
+                     # Recursively convert value if it's also an alist/list of alists
+                     result_dict[key] = _try_convert_alist_to_dict(value)
+                 else:
+                     # Unexpected format within the supposed alist, return original data
+                     print(f"Warning: Unexpected item format in potential alist: {item}. Returning original data.", file=sys.stderr)
+                     return data # Return original list on format error
+             return result_dict
+        else:
+            # Not an alist or list of alists we recognize, could be a simple list.
+            # Return list with elements potentially converted.
+            return [_try_convert_alist_to_dict(item) for item in data]
+    # If it's not a list, return it as is (e.g., already a dict, string, number, etc.)
+    return data
 
 
 if __name__ == "__main__":

@@ -90,6 +90,7 @@ def _build_system_prompt(session_path: str, model_name: str) -> str:
         shell=shell,
         homedir=homedir.replace(os.sep, '/')
     )
+    return prompt
 
 def send_message(msg_type, session_path, **kwargs):
     """Sends a JSON message to stdout for the main process."""

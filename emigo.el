@@ -973,15 +973,17 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
             nil)
         (nreverse history-list)))))
 
-(defun emigo--convert-plist-to-dict-list (plist-list)
-  "Convert Elisp list of plists '((:key val ...)...) to list of maps for JSON."
+(defun emigo--convert-plist-to-alist (plist-list)
+  "Convert Elisp list of plists '((:key val ...)...) to list of alists for EPC/JSON."
   (mapcar (lambda (plist)
-            (let ((map (make-hash-table :test 'equal)))
+            (let ((alist '()))
               (while plist
                 (let ((key (symbol-name (pop plist))) ;; Convert symbol key to string
                       (val (pop plist)))
-                  (puthash key val map)))
-              map))
+                  ;; Prepend to build the alist
+                  (push (cons key val) alist)))
+              ;; Reverse to maintain original order (optional but often preferred)
+              (nreverse alist)))
           plist-list))
 
 (defun emigo-send-revised-history ()
@@ -1009,16 +1011,16 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
           ;; Split into history and the final user prompt
           (let* ((new-history-plists (butlast revised-history))
                  (user-prompt-plist last-message-plist)
-                 ;; Convert to JSON-compatible formats (list of maps, single map)
-                 (new-history-maps (emigo--convert-plist-to-dict-list new-history-plists))
-                 (user-prompt-map (car (emigo--convert-plist-to-dict-list (list user-prompt-plist))))) ;; Convert single plist
+                 ;; Convert to JSON-compatible formats (list of alists, single alist)
+                 (new-history-alists (emigo--convert-plist-to-alist new-history-plists)) ;; USE ALIST
+                 (user-prompt-alist (car (emigo--convert-plist-to-alist (list user-prompt-plist))))) ;; USE ALIST
 
-            (message "[Emigo] Setting history and sending new prompt: %s" user-prompt-map)
+            (message "[Emigo] Setting history and sending new prompt: %s" user-prompt-alist) ;; Log the alist
             ;; Call the new Python EPC method
             (emigo-call-async "set_history_and_send"
                               emigo-session-path
-                              new-history-maps
-                              user-prompt-map)))
+                              new-history-alists ;; Pass list of alists
+                              user-prompt-alist))) ;; Pass single alist
 
         ;; Optionally switch back to the main emigo buffer automatically
         (let ((main-buffer-name (format "*emigo:%s*" emigo-session-path)))
