@@ -492,6 +492,26 @@ class Context:
                 import traceback
                 details += f"# Traceback:\n{traceback.format_exc()}\n"
 
+        # --- Repository Map ---
+        details += "# Repository Map (Ranked by Relevance, Excludes Chat Files)\n"
+        try:
+            if self.repo_mapper:
+                # Convert relative chat file paths to absolute for RepoMapper
+                chat_files_abs = [os.path.abspath(os.path.join(self.session_path, f)) for f in self.chat_files]
+                # Generate the map - RepoMapper handles finding other files and ranking
+                repo_map_content = self.repo_mapper.generate_map(chat_files=chat_files_abs)
+                if repo_map_content and repo_map_content.strip():
+                    details += repo_map_content # Add the generated map
+                else:
+                    details += "(No relevant files found for repository map or map is empty)\n"
+            else:
+                details += "(RepoMapper not available for map generation)\n"
+        except Exception as e:
+            details += f"# Error generating repository map: {str(e)}\n"
+            # Optionally include traceback if verbose
+            if self.verbose:
+                import traceback
+                details += f"# Traceback:\n{traceback.format_exc()}\n"
 
         # --- List Added Files and Content ---
         if self.chat_files:
@@ -514,27 +534,6 @@ class Context:
         else:
              details += "# Files Currently in Chat Context\n(None)\n\n"
 
-
-        # --- Repository Map ---
-        details += "# Repository Map (Ranked by Relevance, Excludes Chat Files)\n"
-        try:
-            if self.repo_mapper:
-                # Convert relative chat file paths to absolute for RepoMapper
-                chat_files_abs = [os.path.abspath(os.path.join(self.session_path, f)) for f in self.chat_files]
-                # Generate the map - RepoMapper handles finding other files and ranking
-                repo_map_content = self.repo_mapper.generate_map(chat_files=chat_files_abs)
-                if repo_map_content and repo_map_content.strip():
-                    details += repo_map_content # Add the generated map
-                else:
-                    details += "(No relevant files found for repository map or map is empty)\n"
-            else:
-                details += "(RepoMapper not available for map generation)\n"
-        except Exception as e:
-            details += f"# Error generating repository map: {str(e)}\n"
-            # Optionally include traceback if verbose
-            if self.verbose:
-                import traceback
-                details += f"# Traceback:\n{traceback.format_exc()}\n"
 
         details += "\n</context>"
         return details
