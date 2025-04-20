@@ -17,8 +17,7 @@ from typing import List, Dict, Optional, Tuple
 
 from repomapper import RepoMapper
 from utils import (
-    eval_in_emacs, _filter_context, read_file_content, message_emacs,
-    get_os_name # Import get_os_name if needed by moved functions (e.g., _build_system_prompt if moved here later)
+    eval_in_emacs, read_file_content, message_emacs
 )
 
 
