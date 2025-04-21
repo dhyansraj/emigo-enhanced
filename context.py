@@ -323,7 +323,7 @@ class Context:
         abs_path = os.path.abspath(os.path.join(self.session_path, rel_path))
         try:
             # Use RepoMapper's mtime getter if available
-            current_mtime = self.repo_mapper.repo_mapper.get_mtime(abs_path) if self.repo_mapper else None
+            current_mtime = self.repo_mapper.repomap.get_mtime(abs_path) if self.repo_mapper else None
             if current_mtime is None: # File deleted, inaccessible, or RepoMapper failed
                 # Fallback to os.path.getmtime if RepoMapper didn't provide it
                 if os.path.isfile(abs_path):
@@ -386,43 +386,70 @@ class Context:
 
     # --- Context String Generation ---
 
-    def _handle_file_mentions(self, prompt: str):
-        """Finds @file mentions in the prompt and adds them to context."""
+    def _handle_mentions(self, prompt: str) -> List[str]:
+        """
+        Finds @file mentions in the prompt, adds them to context, and returns
+        a list of absolute paths for the successfully processed mentioned files.
+        """
         mention_pattern = r'@(\S+)'
-        # Avoid matching email addresses by requiring path-like characters or quotes
-        # A simpler pattern might be sufficient if complex filenames aren't common.
-        # mention_pattern = r'@([\w./\\"-]+)' # Example allowing more chars
+        # TODO: Add identifier extraction if needed, e.g., @ident:my_func
+        # For now, only handles file mentions.
 
         mentioned_files_in_prompt = re.findall(mention_pattern, prompt)
+        processed_mention_files_abs = [] # Store absolute paths of files successfully added/found
+
         if mentioned_files_in_prompt:
-            print(f"Found file mentions in prompt: {mentioned_files_in_prompt}", file=sys.stderr)
-            added_files = []
-            failed_files = []
+            if self.verbose: print(f"Found file mentions in prompt: {mentioned_files_in_prompt}", file=sys.stderr)
+            added_files_rel = []
+            failed_files_info = []
+            already_present_files_rel = []
+
             for file_mention in mentioned_files_in_prompt:
                 # Attempt to add the mentioned file
                 success, msg = self.add_file_to_context(file_mention)
-                if success:
-                    added_files.append(file_mention)
-                    # message_emacs(msg) # Notify Emacs immediately (optional)
-                elif "already in context" not in msg: # Don't report failure if already added
-                    failed_files.append(f"{file_mention} ({msg})")
+                # Need the relative path for reporting and the absolute path for get_related_files
+                try:
+                    # Resolve to absolute path relative to session path
+                    abs_path = os.path.abspath(os.path.join(self.session_path, os.path.relpath(os.path.expanduser(file_mention), self.session_path)))
+                    rel_path = os.path.relpath(abs_path, self.session_path) # Get canonical relative path
+
+                    if success:
+                        added_files_rel.append(rel_path)
+                        processed_mention_files_abs.append(abs_path)
+                    elif "already in context" in msg:
+                        already_present_files_rel.append(rel_path)
+                        processed_mention_files_abs.append(abs_path) # Include already present files
+                    else: # Failed for other reasons
+                        failed_files_info.append(f"{file_mention} ({msg})")
+                except ValueError:
+                     failed_files_info.append(f"{file_mention} (Invalid path or outside session)")
+                except Exception as e:
+                     failed_files_info.append(f"{file_mention} (Error: {e})")
+
 
             # Report summary to Emacs after processing all mentions
-            report_msg = ""
-            if added_files:
-                report_msg += f"Auto-added mentioned files: {', '.join(added_files)}. "
-            if failed_files:
-                report_msg += f"Failed to add mentioned files: {', '.join(failed_files)}."
+            report_parts = []
+            if added_files_rel:
+                report_parts.append(f"Auto-added mentioned files: {', '.join(added_files_rel)}")
+            if already_present_files_rel:
+                 # Optionally report files that were already present
+                 # report_parts.append(f"Mentioned files already in context: {', '.join(already_present_files_rel)}")
+                 pass # Keep report concise
+            if failed_files_info:
+                report_parts.append(f"Failed to add mentioned files: {', '.join(failed_files_info)}")
 
-            if report_msg:
-                 message_emacs(f"[Emigo] {report_msg.strip()}")
+            if report_parts:
+                 message_emacs(f"[Emigo] {'. '.join(report_parts).strip()}")
+
+        return processed_mention_files_abs # Return list of absolute paths
 
 
     def generate_context_string(self, current_prompt: Optional[str] = None) -> str:
         """
         Generates the full context string (<context>) for the LLM,
         including file structure, chat file content, and the repository map.
-        Handles @file mentions in the current_prompt if provided.
+        Handles @file mentions in the current_prompt if provided and includes
+        related files based on those mentions.
 
         Args:
             current_prompt: The user's latest prompt (optional). If provided,
@@ -431,23 +458,29 @@ class Context:
         Returns:
             The formatted <context> string.
         """
-        # Handle @file mentions if a prompt is provided
+        mentioned_files_abs = []
+        # Handle @file mentions if a prompt is provided and get absolute paths
         if current_prompt:
-            self._handle_file_mentions(current_prompt)
+            mentioned_files_abs = self._handle_mentions(current_prompt)
+            # TODO: Extract mentioned identifiers here if needed
 
         # Clean up session cache for files no longer in chat_files list before generating
-        # (This might be redundant if remove_file_from_context handles it, but safe to keep)
         current_chat_files_set = set(self.chat_files)
         for rel_path in list(self.caches['mtimes'].keys()):
             if rel_path not in current_chat_files_set:
                 self.invalidate_cache(rel_path)
 
-        # --- Start Building Context String ---
-        details = "<context>\n"
-        details += f"# Session Directory\n{self.session_path.replace(os.sep, '/')}\n\n" # Use POSIX path
+        # --- Start Building Context Sections ---
+        token_counts = {}
+        total_tokens = 0
 
-        # --- File/Directory Listing ---
-        details += "# File/Directory Structure (Source Files Only)\n"
+        # Section 1: Header and Session Path
+        header_section = "<context>\n"
+        session_path_section = f"# Session Directory\n{self.session_path.replace(os.sep, '/')}\n\n" # Use POSIX path
+        token_counts["Session Path"] = self._count_tokens(session_path_section)
+
+        # Section 2: File/Directory Listing
+        file_listing_section = "# File/Directory Structure (Source Files Only)\n"
         try:
             if self.repo_mapper:
                 # Use RepoMapper's file finding logic for consistency
@@ -480,59 +513,116 @@ class Context:
                         continue # Skip this file
 
                 if tree_lines:
-                    details += "```\n" + "\n".join(tree_lines) + "\n```\n\n"
+                    file_listing_content = "```\n" + "\n".join(tree_lines) + "\n```\n\n"
                 else:
-                    details += "(No relevant source files or directories found)\n\n"
+                    file_listing_content = "(No relevant source files or directories found)\n\n"
             else:
-                details += "(RepoMapper not available for file listing)\n\n"
+                file_listing_content = "(RepoMapper not available for file listing)\n\n"
         except Exception as e:
-            details += f"# Error listing files/directories: {str(e)}\n\n"
+            file_listing_content = f"# Error listing files/directories: {str(e)}\n\n"
             if self.verbose:
                 import traceback
-                details += f"# Traceback:\n{traceback.format_exc()}\n"
+                file_listing_content += f"# Traceback:\n{traceback.format_exc()}\n"
+        file_listing_section += file_listing_content
+        token_counts["File Listing"] = self._count_tokens(file_listing_section)
 
-        # --- Repository Map ---
-        details += "# Repository Map (Ranked by Relevance, Excludes Chat Files)\n"
+
+        # Section 3: Repository Map
+        repo_map_section = "# Repository Map (Ranked by Relevance, Excludes Chat Files)\n"
         try:
             if self.repo_mapper:
                 # Convert relative chat file paths to absolute for RepoMapper
                 chat_files_abs = [os.path.abspath(os.path.join(self.session_path, f)) for f in self.chat_files]
                 # Generate the map - RepoMapper handles finding other files and ranking
+                # Pass only chat_files_abs for ranking bias
                 repo_map_content = self.repo_mapper.generate_map(chat_files=chat_files_abs)
                 if repo_map_content and repo_map_content.strip():
-                    details += repo_map_content # Add the generated map
+                    repo_map_section += repo_map_content # Add the generated map
                 else:
-                    details += "(No relevant files found for repository map or map is empty)\n"
+                    repo_map_section += "(No relevant files found for repository map or map is empty)\n\n" # Add newline
             else:
-                details += "(RepoMapper not available for map generation)\n"
+                repo_map_section += "(RepoMapper not available for map generation)\n"
         except Exception as e:
-            details += f"# Error generating repository map: {str(e)}\n"
+            repo_map_section += f"# Error generating repository map: {str(e)}\n"
             # Optionally include traceback if verbose
             if self.verbose:
                 import traceback
-                details += f"# Traceback:\n{traceback.format_exc()}\n"
+                repo_map_section += f"# Traceback:\n{traceback.format_exc()}\n\n" # Add newline
+        token_counts["Repo Map"] = self._count_tokens(repo_map_section)
 
-        # --- List Added Files and Content ---
+
+        # Section 4: Related Files (Based on Mentions)
+        related_files_section = "\n# Related Files (Based on @file mentions)\n"
+        related_files_content = "(No @file mentions in the last prompt or no related files found)\n"
+        if mentioned_files_abs:
+            try:
+                # Pass absolute paths of mentioned files, get relative paths back
+                # TODO: Pass mentioned identifiers if extracted
+                related_files_rel = self.repo_mapper.get_related_files(
+                    target_files=mentioned_files_abs
+                )
+                if related_files_rel:
+                    related_files_content = "```\n" + "\n".join(sorted(related_files_rel)) + "\n```\n"
+                else:
+                     related_files_content = "(No files found referencing or defining elements from mentioned files)\n"
+            except Exception as e:
+                related_files_content = f"# Error finding related files: {str(e)}\n"
+                if self.verbose:
+                    import traceback
+                    related_files_content += f"# Traceback:\n{traceback.format_exc()}\n"
+        related_files_section += related_files_content + "\n"
+        token_counts["Related Files"] = self._count_tokens(related_files_section)
+
+
+        # Section 5: Chat File Content
+        chat_files_section = ""
         if self.chat_files:
-            details += "# Files Currently in Chat Context\n"
+            chat_files_section += "# Files Currently in Chat (The ONLY source-of-truth representing up-to-date file content)\n"
             for rel_path in sorted(self.chat_files): # Sort for consistent order
                 posix_rel_path = rel_path.replace(os.sep, '/')
+                file_content_str = ""
                 try:
                     # Get content using the internal cache getter method
-                    content = self.get_cached_content(rel_path)
+                    content = self.get_cached_content(rel_path) # This handles cache updates
                     if content is None:
-                        content = f"# Error: Could not get content for {posix_rel_path}\n"
+                        content = f"# Error: Could not get content for {posix_rel_path}"
                         if self.verbose:
                              print(f"Content retrieval failed for {rel_path} during context generation.", file=sys.stderr)
+                    else:
+                        # Only add actual content if retrieved successfully
+                        pass # Content is ready
 
                     # Use markdown code block for file content
-                    details += f"## File: {posix_rel_path}\n```\n{content}\n```\n\n"
+                    file_content_str = f"## File: {posix_rel_path}\n```\n{content}\n```\n\n"
 
                 except Exception as e:
-                    details += f"## File: {posix_rel_path}\n# Error accessing file content: {e}\n\n"
+                    file_content_str = f"## File: {posix_rel_path}\n# Error accessing file content: {e}\n"
+
+                chat_files_section += file_content_str
         else:
-             details += "# Files Currently in Chat Context\n(None)\n\n"
+             chat_files_section += "# Files Currently in Chat Context\n(None)\n"
+        token_counts["Chat Files"] = self._count_tokens(chat_files_section)
 
 
-        details += "\n</context>"
+        # Section 6: Footer
+        footer_section = "\n</context>"
+        token_counts["Tags"] = self._count_tokens(header_section + footer_section) # Count <context> tags
+
+        # --- Combine Sections and Print Token Counts ---
+        details = (
+            header_section +
+            session_path_section +
+            file_listing_section +
+            repo_map_section +
+            related_files_section +
+            chat_files_section +
+            footer_section
+        )
+
+        total_tokens = sum(token_counts.values())
+        print("--- Context Token Counts ---", file=sys.stderr)
+        for section, count in token_counts.items():
+            print(f"- {section}: {count}", file=sys.stderr)
+        print(f"--- Total Context Tokens: {total_tokens} ---", file=sys.stderr)
+
         return details

@@ -29,11 +29,12 @@ interface for standalone usage and debugging.
 import argparse
 import math
 import os
-import shutil
-import sys # Import sys module
+import sys
 import time
-from collections import Counter, defaultdict, namedtuple
+import re
+from collections import Counter, defaultdict
 from pathlib import Path
+from typing import List
 
 import tiktoken
 from diskcache import Cache
@@ -255,10 +256,11 @@ try:
 except ImportError as e:
     raise ImportError("grep-ast with tree-sitter bindings is required. Try: pip install grep-ast") from e
 
-# --- Constants and Definitions ---
+# --- Constants ---
 
-Tag = namedtuple("Tag", "rel_fname fname line name kind".split())
 TAGS_CACHE_DIR = ".emigo_repomap"
+# Simple tuple for tags instead of namedtuple
+Tag = tuple # (rel_fname, fname, line, name, kind)
 
 # --- Utility Functions ---
 
@@ -268,8 +270,7 @@ def read_text(filename, encoding="utf-8", errors="ignore"):
         with open(str(filename), "r", encoding=encoding, errors=errors) as f:
             return f.read()
     except (FileNotFoundError, IsADirectoryError, OSError, UnicodeError):
-        # Log specific errors if verbose is enabled elsewhere, otherwise fail silently
-        return None
+        return None # Fail silently on read errors
 
 
 def get_rel_fname(fname, root):
@@ -300,10 +301,10 @@ def filter_important_files(file_paths):
     return [fp for fp in file_paths if is_important(fp)]
 
 
-# --- RepoMap Class ---
+# --- Core Logic ---
 
 class RepoMap:
-    warned_files = set() # Track files we warned about (e.g., not found)
+    warned_files = set()
 
     def __init__(
         self,
@@ -317,16 +318,17 @@ class RepoMap:
         self.root = os.path.abspath(root)
         self.max_map_tokens = map_tokens
         self.force_refresh = force_refresh
+        self.tokenizer = tiktoken.get_encoding(tokenizer_name) # Let exceptions propagate
 
-        try:
-            self.tokenizer = tiktoken.get_encoding(tokenizer_name)
-        except Exception as e:
-            raise ValueError(f"Error initializing tokenizer '{tokenizer_name}': {e}. Ensure tiktoken is installed.") from e
-
-        self.load_tags_cache()
+        self.TAGS_CACHE = self.load_tags_cache()
         self.tree_cache = {}
         self.tree_context_cache = {}
         self.map_processing_time = 0
+        # Store scanned tag info globally within the instance
+        self._all_tags = []
+        self._defines = defaultdict(set)
+        self._references = defaultdict(list)
+        self._scanned_fnames = set()
 
     def token_count(self, text):
         """Counts tokens using the tiktoken tokenizer."""
@@ -334,92 +336,97 @@ class RepoMap:
             text = str(text)
         return len(self.tokenizer.encode(text))
 
-    def get_repo_map(self, chat_files, other_files, mentioned_fnames=None, mentioned_idents=None):
+    def get_repo_map(self, chat_files, other_files):
         """Generates the repository map string."""
-        if self.max_map_tokens <= 0:
-            return "" # Skip if no tokens allowed
-        if not other_files and not chat_files:
-            return "" # Skip if no files to map
+        if self.max_map_tokens <= 0 or not (other_files or chat_files):
+            return ""
 
         start_time = time.time()
-        try:
-            files_listing = self.get_ranked_tags_map_uncached(
-                chat_files, other_files, self.max_map_tokens, mentioned_fnames, mentioned_idents
-            )
-        except Exception as e:
-            # Log the error if verbose, but return empty string otherwise
-            if self.verbose:
-                print(f"ERROR: Failed map generation: {e}", file=sys.stderr)
-            return ""
-        end_time = time.time()
-        self.map_processing_time = end_time - start_time
+        # Ensure tags are scanned before ranking
+        self._scan_all_tags(set(chat_files) | set(other_files))
+
+        files_listing = self.get_ranked_tags_map_uncached(
+            chat_files, other_files, self.max_map_tokens
+        )
+        self.map_processing_time = time.time() - start_time
 
         if not files_listing:
             return ""
 
-        if self.verbose:
-            num_tokens = self.token_count(files_listing)
-            print(f"Repo Map: {num_tokens} tokens, {self.map_processing_time:.2f}s", file=sys.stderr)
+        print(f"Repo Map processed in {self.map_processing_time:.2f}s", file=sys.stderr)
 
-        return f"Repository Map:\n{files_listing}"
+        return files_listing
 
     def load_tags_cache(self):
         """Loads the tags cache from disk or initializes it."""
         path = Path(self.root) / TAGS_CACHE_DIR
         try:
-            self.TAGS_CACHE = Cache(path)
-            # Basic check to see if cache is usable
-            _ = len(self.TAGS_CACHE)
-        except Exception as e:
+            # Attempt to initialize disk cache
+            cache = Cache(path)
+            _ = len(cache) # Basic check
+            return cache
+        except Exception:
             # Fallback to in-memory dict if disk cache fails
-            if self.verbose:
-                print(f"Warning: Disk cache error at {path}: {e}. Using in-memory cache.", file=sys.stderr)
-            self.TAGS_CACHE = dict()
+            return dict() # Return a simple dict as the cache interface
 
     def get_mtime(self, fname):
-        """Gets the modification time of a file, returns None on error."""
-        try:
-            return os.path.getmtime(fname)
-        except OSError: # Catches FileNotFoundError and other OS issues
-            return None
+        """Gets the modification time of a file."""
+        return os.path.getmtime(fname)
 
     def get_tags(self, fname, rel_fname):
         """Gets tags for a file, using the cache if possible."""
         file_mtime = self.get_mtime(fname)
         if file_mtime is None:
-            return [] # File not accessible
+            return []
 
         cache_key = fname
-        cached_val = None
-        try:
-            cached_val = self.TAGS_CACHE.get(cache_key)
-        except Exception as e:
-            # Log if verbose, but treat as cache miss
-            if self.verbose:
-                print(f"Warning: Cache read error for {fname}: {e}", file=sys.stderr)
+        cached_val = None # Initialize
+        if hasattr(self.TAGS_CACHE, 'get'):
+            try:
+                # Attempt to retrieve from cache
+                cached_val = self.TAGS_CACHE.get(cache_key)
+            except TypeError as e:
+                # Handle potential unpickling errors (e.g., type definition changed)
+                if self.verbose:
+                    print(f"Warning: Cache read error for {fname} (likely format change): {e}. Regenerating.", file=sys.stderr)
+                # Treat as cache miss by leaving cached_val as None
+                # Explicitly delete the bad cache entry to prevent repeated warnings
+                if hasattr(self.TAGS_CACHE, 'delete'):
+                    try:
+                        self.TAGS_CACHE.delete(cache_key)
+                        if self.verbose:
+                            print(f"Info: Deleted invalid cache entry for {fname}.", file=sys.stderr)
+                    except Exception as delete_e:
+                        if self.verbose:
+                            print(f"Warning: Failed to delete invalid cache entry for {fname}: {delete_e}", file=sys.stderr)
+            except Exception as e:
+                # Handle other potential cache read errors
+                if self.verbose:
+                    print(f"Warning: Unexpected cache read error for {fname}: {e}. Regenerating.", file=sys.stderr)
+                # Treat as cache miss
 
-        # Check cache validity
-        if (not self.force_refresh and
-            isinstance(cached_val, dict) and
-            cached_val.get("mtime") == file_mtime):
-            return cached_val.get("data", []) # Return cached data
+        # Check cache validity (only if cached_val was successfully retrieved)
+        if not self.force_refresh and isinstance(cached_val, dict) and cached_val.get("mtime") == file_mtime:
+            # Ensure 'data' exists and is a list before returning
+            data = cached_val.get("data")
+            if isinstance(data, list):
+                return data
+            elif self.verbose:
+                 print(f"Warning: Invalid cache data format for {fname}. Regenerating.", file=sys.stderr)
+            # Fall through to regenerate if data is not a list
 
         # Cache miss or invalid: Generate tags
-        if self.verbose and not cached_val:
-             print(f"Cache miss for {rel_fname}, generating tags...", file=sys.stderr)
-        elif self.verbose:
-             print(f"Cache outdated for {rel_fname}, regenerating tags...", file=sys.stderr)
-
         data = list(self.get_tags_raw(fname, rel_fname))
 
-        # Update cache
-        try:
-            cache_entry = {"mtime": file_mtime, "data": data}
-            self.TAGS_CACHE[cache_key] = cache_entry
-        except Exception as e:
-            # Log if verbose, but continue
-            if self.verbose:
-                print(f"Warning: Cache write error for {fname}: {e}", file=sys.stderr)
+        # Update cache if it's a real cache object
+        if hasattr(self.TAGS_CACHE, '__setitem__'):
+            try:
+                cache_entry = {"mtime": file_mtime, "data": data}
+                self.TAGS_CACHE[cache_key] = cache_entry
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: Cache write error for {fname}: {e}", file=sys.stderr)
+                # Ignore cache write errors silently otherwise
 
         return data
 
@@ -434,254 +441,279 @@ class RepoMap:
             language = get_language(lang)
             parser = get_parser(lang)
         except Exception:
-            # Silently skip if parser not found for this language
-            return
-
-        query_scm_path = get_scm_fname(lang)
-        query_scm = None
-        if query_scm_path:
-            try:
-                query_scm = query_scm_path.read_text(encoding='utf-8')
-            except OSError:
-                query_scm = None # Ignore if SCM file is unreadable
+            return # Silently skip if parser not found
 
         code = read_text(fname)
         if not code:
             return
-        tree = parser.parse(bytes(code, "utf-8"))
-
-        saw_defs = False
-        saw_refs = False
 
         # Tree-sitter tags
-        if query_scm:
+        query_scm_path = get_scm_fname(lang)
+        tree_sitter_refs_found = False
+        if query_scm_path:
             try:
+                query_scm = query_scm_path.read_text(encoding='utf-8')
+                tree = parser.parse(bytes(code, "utf-8"))
                 query = language.query(query_scm)
                 captures = query.captures(tree.root_node)
-                all_nodes = [(node, tag_name) for tag_name, nodes in captures.items() for node in nodes]
 
-                for node, tag_name in all_nodes:
+                for node, tag_name in [(node, tag_name) for tag_name, nodes in captures.items() for node in nodes]:
                     kind = None
                     if tag_name.startswith("name.definition."):
                         kind = "def"
-                        saw_defs = True
                     elif tag_name.startswith("name.reference."):
                         kind = "ref"
-                        saw_refs = True
+                        tree_sitter_refs_found = True
 
                     if kind:
                         try:
                             name_text = node.text.decode("utf-8")
-                            yield Tag(rel_fname, fname, node.start_point[0], name_text, kind)
+                            # Use tuple directly: (rel_fname, fname, line, name, kind)
+                            yield (rel_fname, fname, node.start_point[0], name_text, kind)
                         except (AttributeError, UnicodeDecodeError):
                             continue # Skip invalid nodes
-            except Exception as e:
-                 if self.verbose:
-                     print(f"Warning: Tree-sitter query failed for {fname}: {e}", file=sys.stderr)
+            except Exception:
+                 pass # Silently ignore tree-sitter errors
 
-        # Pygments fallback for references if needed
-        if not saw_refs and query_scm or not query_scm: # Use pygments if no refs found or no SCM
+        # Pygments fallback for references if tree-sitter didn't find any or wasn't used
+        if not tree_sitter_refs_found:
             try:
                 lexer = guess_lexer_for_filename(fname, code)
                 tokens = lexer.get_tokens(code)
                 for token_type, token_text in tokens:
                     if token_type in Token.Name:
-                        yield Tag(rel_fname, fname, -1, token_text, "ref") # Line -1 for pygments
-            except Exception as e:
-                 if self.verbose:
-                     print(f"Warning: Pygments failed for {fname}: {e}", file=sys.stderr)
+                        # Use tuple directly: (rel_fname, fname, line, name, kind)
+                        yield (rel_fname, fname, -1, token_text, "ref") # Line -1 for pygments
+            except Exception:
+                 pass # Silently ignore pygments errors
 
-    def get_ranked_tags(self, chat_fnames, other_fnames, mentioned_fnames, mentioned_idents):
-        """Ranks tags using PageRank."""
-        defines = defaultdict(set)      # {ident: {rel_fname, ...}}
-        references = defaultdict(list)  # {ident: [rel_fname, ...]}
-        definitions = defaultdict(set)  # {(rel_fname, ident): {Tag, ...}}
-        personalization = {}
+    def _scan_all_tags(self, fnames_to_scan):
+        if self.force_refresh:
+            self._all_tags = []
+            self._defines = defaultdict(set)
+            self._references = defaultdict(list)
+            self._definitions = defaultdict(set)
+            self._scanned_fnames = set()
+            files_to_process = fnames_to_scan # Rescan everything requested
+        else:
+            files_to_process = fnames_to_scan - self._scanned_fnames
+            if not files_to_process:
+                return # Nothing new to scan
 
-        all_fnames = set(chat_fnames) | set(other_fnames)
-        chat_rel_fnames = {get_rel_fname(f, self.root) for f in chat_fnames}
-        mentioned_rel_fnames = {get_rel_fname(f, self.root) for f in mentioned_fnames}
-
-        # Calculate base personalization value
-        personalize_base = 100 / len(all_fnames) if all_fnames else 1
-
-        # --- Scan files and build initial data structures ---
-        for fname in sorted(list(all_fnames)):
-            if not Path(fname).is_file():
-                if fname not in self.warned_files:
-                    # Only warn once per file if verbose
-                    if self.verbose: print(f"Warning: Skipping non-file {fname}", file=sys.stderr)
-                    self.warned_files.add(fname)
+        new_tags = []
+        processed_fnames = set()
+        for fname in sorted(list(files_to_process)):
+            abs_fname = os.path.abspath(os.path.join(self.root, fname))
+            if not Path(abs_fname).is_file():
+                if abs_fname not in self.warned_files:
+                    # Keep minimal warning for non-existent files
+                    print(f"Warning: Skipping non-file {abs_fname}", file=sys.stderr)
+                    self.warned_files.add(abs_fname)
                 continue
 
-            rel_fname = get_rel_fname(fname, self.root)
-            if rel_fname in chat_rel_fnames or rel_fname in mentioned_rel_fnames:
-                personalization[rel_fname] = personalize_base
+            rel_fname = get_rel_fname(abs_fname, self.root)
+            tags = self.get_tags(abs_fname, rel_fname)
+            new_tags.extend(tags)
+            processed_fnames.add(fname) # Track successfully processed files
 
-            tags = self.get_tags(fname, rel_fname) # Use cached tags
-            for tag in tags:
-                if tag.kind == "def":
-                    defines[tag.name].add(rel_fname)
-                    definitions[(rel_fname, tag.name)].add(tag)
-                elif tag.kind == "ref":
-                    references[tag.name].append(rel_fname)
+        self._scanned_fnames.update(processed_fnames)
 
-        # Use definitions as references if no explicit references found
-        if not references and defines:
-            references = {k: list(v) for k, v in defines.items()}
+        # Update global tag structures only if new tags were found or refreshing
+        if new_tags or self.force_refresh:
+            self._all_tags.extend(new_tags) # Append new tags
+            # Rebuild defines/references from the potentially updated _all_tags
+            self._defines = defaultdict(set)
+            self._references = defaultdict(list)
+            self._definitions = defaultdict(set)
+            for tag_tuple in self._all_tags:
+                # Unpack the tuple: (rel_fname, fname, line, name, kind)
+                rel_fname, _, _, name, kind = tag_tuple
+                if kind == "def":
+                    self._defines[name].add(rel_fname)
+                    self._definitions[(rel_fname, name)].add(tag_tuple)
+                elif kind == "ref":
+                    self._references[name].append(rel_fname)
+
+            # Fallback: Use definitions as references if no explicit references found
+            if not self._references and self._defines:
+                self._references = {k: list(v) for k, v in self._defines.items()}
+
+
+    def get_ranked_tags(self, chat_fnames, other_fnames):
+        # chat_fnames and other_fnames are expected to be absolute paths here
+        all_abs_fnames = set(chat_fnames) | set(other_fnames)
+        # Filter chat files to ensure they exist before getting rel_fname
+        chat_rel_fnames = {get_rel_fname(f, self.root) for f in chat_fnames if Path(f).is_file()}
+
+        # Ensure tags for all relevant files are loaded/scanned
+        # Scan based on relative paths derived from existing absolute paths
+        self._scan_all_tags({get_rel_fname(f, self.root) for f in all_abs_fnames if Path(f).is_file()})
+
+        # Use the scanned data stored in the instance attributes
+        defines = self._defines
+        references = self._references
 
         # --- Build Dependency Graph ---
         G = nx.MultiDiGraph()
+        # Use only identifiers that have both definitions and references recorded
         idents = set(defines.keys()) & set(references.keys())
+        # Get all relative filenames that were successfully scanned and exist
+        scanned_rel_fnames = {get_rel_fname(f, self.root) for f in self._scanned_fnames if Path(os.path.join(self.root, f)).is_file()}
 
         for ident in idents:
-            definers = defines[ident]
-            mul = 10 if ident in mentioned_idents else (0.1 if ident.startswith("_") else 1)
+            definers = defines[ident] & scanned_rel_fnames # Intersect with scanned files
+            referencers_counts = Counter(ref for ref in references[ident] if ref in scanned_rel_fnames) # Filter refs too
+            mul = 0.1 if ident.startswith("_") else 1
 
-            for referencer, num_refs in Counter(references[ident]).items():
+            for referencer, num_refs in referencers_counts.items():
                 weight = math.sqrt(num_refs) * mul
                 for definer in definers:
+                    # Both referencer and definer are guaranteed to be in scanned_rel_fnames now
                     G.add_edge(referencer, definer, weight=weight, ident=ident)
 
-        # Add nodes for files without edges to ensure they are in the graph for PageRank
-        all_rel_fnames = {get_rel_fname(f, self.root) for f in all_fnames if Path(f).is_file()}
-        for rel_fname in all_rel_fnames:
-            if not G.has_node(rel_fname):
+        # Add nodes for any scanned files not yet in the graph (e.g., only definitions or only refs)
+        for rel_fname in scanned_rel_fnames:
+            if rel_fname not in G: # Use 'in' for node check
                 G.add_node(rel_fname)
 
         # --- Run PageRank ---
         ranked = {}
-        if G.number_of_nodes() > 0:
+        if G: # Check if graph is not empty
+            # Calculate personalization based on chat files present in the graph
+            personalization = {
+                rel_fname: 100.0 / len(chat_rel_fnames)
+                for rel_fname in chat_rel_fnames if rel_fname in G
+            } if chat_rel_fnames else {}
+
             try:
                 pers_args = dict(personalization=personalization, dangling=personalization) if personalization else {}
-                ranked = nx.pagerank(G, weight="weight", **pers_args)
-            except Exception as e:
-                # Fallback: Rank nodes equally, respecting personalization
-                if self.verbose: print(f"Warning: PageRank failed ({e}), using fallback ranking.", file=sys.stderr)
-                num_nodes = G.number_of_nodes()
+                ranked = nx.pagerank(G, weight="weight", alpha=0.85, **pers_args)
+            except Exception:
+                # Fallback: Rank nodes equally, respecting personalization if PageRank fails
+                num_nodes = len(G)
                 base_rank = 1.0 / num_nodes if num_nodes > 0 else 0
-                ranked = {node: personalization.get(node, base_rank) for node in G.nodes()}
+                ranked = {node: personalization.get(node, base_rank) for node in G}
                 # Normalize if personalization was used
                 total_rank = sum(ranked.values())
                 if personalization and total_rank > 0:
                     ranked = {node: r / total_rank for node, r in ranked.items()}
 
-        # --- Distribute Rank to Definitions ---
-        ranked_definitions = defaultdict(float)
-        if G.edges():
-            for src in G.nodes():
-                src_rank = ranked.get(src, 0)
-                total_weight = sum(d.get("weight", 0) for _, _, d in G.out_edges(src, data=True))
-                if total_weight > 0:
-                    for _, dst, data in G.out_edges(src, data=True):
-                        ident, weight = data.get("ident"), data.get("weight", 0)
-                        if ident:
-                            ranked_definitions[(dst, ident)] += src_rank * weight / total_weight
+        # Add rank 0 for any scanned files that didn't make it into the ranking (shouldn't happen with current logic)
+        for rel_fname in scanned_rel_fnames:
+            ranked.setdefault(rel_fname, 0.0)
 
-        # --- Collect and Sort Ranked Tags/Files ---
-        ranked_tags_list = []
-        fnames_added = set()
+        # --- Return sorted list of relative filenames (excluding chat files) based on rank ---
+        ranked_non_chat_files = {fname: rank for fname, rank in ranked.items() if fname not in chat_rel_fnames}
+        sorted_ranked_fnames = sorted(ranked_non_chat_files, key=ranked_non_chat_files.get, reverse=True)
 
-        # Add definitions sorted by rank (excluding chat files)
-        sorted_defs = sorted(ranked_definitions.items(), key=lambda x: x[1], reverse=True)
-        for (rel_fname, ident), _rank in sorted_defs:
-            if rel_fname not in chat_rel_fnames:
-                def_tags = definitions.get((rel_fname, ident), set())
-                ranked_tags_list.extend(list(def_tags))
-                fnames_added.add(rel_fname)
+        return sorted_ranked_fnames
 
-        # Add remaining files sorted by rank (excluding chat files and those already added)
-        rel_other_fnames = {get_rel_fname(f, self.root) for f in other_fnames if Path(f).is_file()}
-        sorted_files = sorted(ranked.items(), key=lambda item: item[1], reverse=True)
-        for rel_fname, _rank in sorted_files:
-            if rel_fname in rel_other_fnames and rel_fname not in fnames_added:
-                ranked_tags_list.append((rel_fname,)) # Represent file-only as tuple
-                fnames_added.add(rel_fname)
 
-        # Add any remaining other_fnames not ranked (e.g., disconnected)
-        remaining_others = sorted(list(rel_other_fnames - fnames_added))
-        for rel_fname in remaining_others:
-             ranked_tags_list.append((rel_fname,))
+    def get_related_files(self, target_fnames: List[str]) -> List[str]:
+        """Finds files referencing identifiers defined in target_fnames."""
+        if not target_fnames:
+            return []
 
-        return ranked_tags_list
+        target_rel_fnames = {get_rel_fname(f, self.root) for f in target_fnames if Path(f).is_file()}
+        if not target_rel_fnames:
+            return []
+
+        # Assume _scan_all_tags was called previously by get_repo_map or similar
+        # Use instance attributes directly
+        all_tags = self._all_tags
+        references = self._references
+
+        # Find identifiers defined *in* target files using the tag tuples
+        defs_in_targets = {tag[3] for tag in all_tags if tag[0] in target_rel_fnames and tag[4] == 'def'} # name is index 3, rel_fname index 0, kind index 4
+
+        related_files = set()
+        for ident in defs_in_targets:
+            # references[ident] contains list of rel_fnames
+            for ref_file in references.get(ident, []):
+                if ref_file not in target_rel_fnames:
+                    related_files.add(ref_file)
+                    print(f"  [Related] File '{ref_file}' references identifier '{ident}' (defined in target file: {target_rel_fnames})", file=sys.stderr)
+
+        return sorted(list(related_files))
+
 
     def get_ranked_tags_map_uncached(
-        self, chat_fnames, other_fnames, max_map_tokens, mentioned_fnames=None, mentioned_idents=None
+        self, chat_fnames, other_fnames, max_map_tokens
     ):
-        """Generates the map string from ranked tags, fitting it into the token limit."""
-        mentioned_fnames = set(mentioned_fnames or [])
-        mentioned_idents = set(mentioned_idents or [])
+        """Generates the map string from ranked files, fitting token limit."""
 
-        ranked_items = self.get_ranked_tags(
-            chat_fnames, other_fnames, mentioned_fnames, mentioned_idents
-        )
+        # Get ranked list of relative filenames (excluding chat files)
+        ranked_fnames = self.get_ranked_tags(chat_fnames, other_fnames)
+        chat_rel_fnames = {get_rel_fname(f, self.root) for f in chat_fnames if Path(f).is_file()}
 
         # Prioritize important files
-        other_rel_fnames = sorted({get_rel_fname(f, self.root) for f in other_fnames if Path(f).is_file()})
-        special_fnames = filter_important_files(other_rel_fnames)
+        other_rel_fnames = {get_rel_fname(f, self.root) for f in other_fnames if Path(f).is_file()}
+        special_fnames_abs = filter_important_files([os.path.join(self.root, f) for f in other_rel_fnames])
+        special_fnames_rel = {get_rel_fname(f, self.root) for f in special_fnames_abs} - chat_rel_fnames
 
-        # Get filenames already represented by ranked items
-        ranked_fnames = set()
-        for item in ranked_items:
-            if isinstance(item, Tag):
-                ranked_fnames.add(item.rel_fname)
-            elif isinstance(item, tuple):
-                ranked_fnames.add(item[0])
+        # Combine: special files first, then ranked, ensuring no duplicates and excluding chat files
+        combined_fnames = sorted(list(special_fnames_rel)) + [
+            fn for fn in ranked_fnames if fn not in special_fnames_rel and fn not in chat_rel_fnames
+        ]
 
-        # Combine: special files first (if not already ranked), then ranked items
-        special_fnames_to_add = [(fn,) for fn in special_fnames if fn not in ranked_fnames]
-        combined_items = special_fnames_to_add + ranked_items
-
-        if not combined_items:
+        if not combined_fnames:
             return ""
 
-        # --- Binary search for optimal number of items ---
-        num_items = len(combined_items)
-        low, high = 0, num_items
+        # --- Binary search for optimal number of files ---
+        num_files = len(combined_fnames)
+        low, high = 0, num_files
         best_tree, best_tokens = "", 0
         self.tree_cache.clear() # Clear render cache for this run
 
-        # Estimate initial mid-point (heuristic)
-        mid = min(int(max_map_tokens / 20), num_items) if num_items > 0 else 0 # Adjusted heuristic
+        # Heuristic start point for binary search
+        mid = min(int(max_map_tokens / 50), num_files) if num_files > 0 else 0
 
         iterations = 0
-        max_iterations = int(math.log2(num_items)) + 5 if num_items > 0 else 0
-
-        chat_rel_fnames = {get_rel_fname(f, self.root) for f in chat_fnames}
+        max_iterations = int(math.log2(num_files)) + 5 if num_files > 0 else 0
 
         while low <= high and iterations < max_iterations:
             iterations += 1
-            current_items = combined_items[:mid]
-            if not current_items:
-                if num_items > 0 and mid == 0: # Ensure low advances if mid starts at 0
-                    low = mid + 1
-                    mid = (low + high) // 2
-                    continue
-                else:
-                    break # No items left to try
+            # Check if mid is valid before slicing
+            if mid < 0 or mid > num_files: mid = (low + high) // 2 # Recalculate if out of bounds
+            if mid == 0 and low == 0: # Handle initial case where mid could be 0
+                 current_fnames = []
+            else:
+                 current_fnames = combined_fnames[:mid]
 
-            tree = self.to_tree(current_items, chat_rel_fnames)
+            if not current_fnames:
+                 # If mid is 0, we haven't tested any files yet.
+                 # If low > 0, it means even 1 file was too much.
+                 if mid == 0 and low == 0:
+                     # Try with 1 file if possible
+                     if num_files > 0:
+                         mid = 1
+                         continue # Re-run loop with mid=1
+                     else:
+                         break # No files to test
+                 else: # mid became 0 because high < low
+                     break # No suitable number of files found
+
+            # Pass only the list of filenames to render (already filtered)
+            tree = self.to_tree(current_fnames)
             num_tokens = self.token_count(tree)
 
             if num_tokens <= max_map_tokens:
-                if num_tokens >= best_tokens: # Prefer larger maps if tokens are equal
+                if num_tokens >= best_tokens: # Prefer larger maps
                     best_tree, best_tokens = tree, num_tokens
-                low = mid + 1 # Try more items
+                low = mid + 1 # Try more files
             else:
-                high = mid - 1 # Try fewer items
+                high = mid - 1 # Try fewer files
 
             mid = (low + high) // 2
 
-            # Optimization: Stop early if close to limit
-            if best_tokens > max_map_tokens * 0.98:
+            # Optimization: Stop early if close enough to the limit
+            if 0.95 * max_map_tokens < best_tokens <= max_map_tokens:
                  break
 
-        if self.verbose:
-            print(f"Selected map size: {best_tokens} tokens", file=sys.stderr)
+        print(f"Selected map size: {best_tokens} tokens using approx {mid} files", file=sys.stderr)
         return best_tree
 
     def render_tree(self, abs_fname, rel_fname, lois):
-        """Renders code snippets using TreeContext, with caching."""
         mtime = self.get_mtime(abs_fname)
         if mtime is None: return f"# Error: Cannot access {rel_fname}\n"
 
@@ -723,49 +755,40 @@ class RepoMap:
         self.tree_cache[render_key] = rendered_output
         return rendered_output
 
-    def to_tree(self, tags_or_files, chat_rel_fnames):
-        """Formats ranked tags/files into the final map string."""
-        if not tags_or_files: return ""
-
-        grouped_tags = defaultdict(list) # {rel_fname: [Tag, ...]}
-        files_only = set()              # {rel_fname, ...}
-
-        # Group items, skipping those in chat
-        for item in tags_or_files:
-            rel_fname = None
-            if isinstance(item, Tag):
-                rel_fname = item.rel_fname
-                if rel_fname not in chat_rel_fnames:
-                    grouped_tags[rel_fname].append(item)
-            elif isinstance(item, tuple) and len(item) == 1:
-                rel_fname = item[0]
-                if rel_fname not in chat_rel_fnames:
-                    files_only.add(rel_fname)
+    def to_tree(self, file_list: List[str]):
+        """Formats files into the map string by rendering their definitions."""
+        if not file_list: return ""
 
         output_parts = []
+        # Assume tags are already scanned and available in self._all_tags
 
-        # Process files with tags
-        for rel_fname in sorted(grouped_tags.keys()):
-            file_tags = grouped_tags[rel_fname]
-            abs_fname = file_tags[0].fname # Assumes all tags for a file have same abs path
-            lois = [tag.line for tag in file_tags if tag.line >= 0]
+        # Process the provided list of relative filenames
+        for rel_fname in sorted(file_list):
+            # Find definition tags for this file directly from _all_tags
+            # tag tuple: (rel_fname, fname, line, name, kind)
+            file_defs = [tag for tag in self._all_tags if tag[0] == rel_fname and tag[4] == 'def']
 
-            output_parts.append("\n" + rel_fname + ":\n")
+            if not file_defs:
+                # List filename if no definitions found (or if ranked for other reasons)
+                output_parts.append(f"\n{rel_fname}\n")
+                continue
+
+            # Get absolute path from the first definition tag found
+            abs_fname = file_defs[0][1] # fname is index 1
+            # Collect valid lines of interest (definitions)
+            lois = sorted(list({tag[2] for tag in file_defs if tag[2] >= 0})) # line is index 2
+
             if lois:
+                output_parts.append(f"\n{rel_fname}:\n")
                 rendered_tree = self.render_tree(abs_fname, rel_fname, lois)
                 output_parts.append(rendered_tree)
-            # else: No specific lines, just list filename (implicitly done by adding header)
+            else:
+                # List filename if file has defs but no valid line numbers (e.g., only pygments refs)
+                output_parts.append(f"\n{rel_fname}\n") # List name only
 
-        # Add files that were ranked but had no specific tags selected
-        # Filter out files already processed via grouped_tags
-        remaining_files_only = sorted(list(files_only - set(grouped_tags.keys())))
-        for rel_fname in remaining_files_only:
-             output_parts.append("\n" + rel_fname + "\n")
-
-        # Join, truncate long lines, and add trailing newline
+        # Join and add trailing newline
         full_output = "".join(output_parts)
-        truncated_output = "\n".join([line[:200] for line in full_output.splitlines()])
-        return truncated_output + "\n" if truncated_output else ""
+        return full_output + "\n" if full_output else ""
 
 
 # --- Helper Functions ---
@@ -777,221 +800,238 @@ def get_scm_fname(lang):
     return query_path if query_path.is_file() else None
 
 
-# --- RepoMapper Wrapper Class ---
+# --- Public API Wrapper ---
 
 class RepoMapper:
+    """Manages repository analysis and map generation."""
     def __init__(self, root_dir, map_tokens=4096, tokenizer="cl100k_base", verbose=False, force_refresh=False):
         self.root = os.path.abspath(root_dir)
-        self.verbose = verbose
-        # Instantiate the core RepoMap logic handler
-        self.repo_mapper = RepoMap(
+        self.verbose = verbose # Keep verbose flag for potential debugging needs
+        self.repomap = RepoMap(
             root=self.root,
             map_tokens=map_tokens,
             verbose=verbose,
             tokenizer_name=tokenizer,
-            force_refresh=force_refresh,
+            force_refresh=force_refresh
         )
-        self.map_generation_time = time.time() # Track last generation time
 
-    def _is_gitignored(self, path):
-        """Checks if a path is gitignored. Requires gitignore_parser."""
+    def _is_gitignored(self, path, matches_func=None):
+        """Checks if a path is gitignored using a pre-parsed matcher."""
+        return matches_func and matches_func(path)
+
+    def _get_gitignore_matcher(self):
+        """Parses .gitignore and returns a matching function."""
         try:
-            # Lazy import to avoid hard dependency if not used/installed
-            from gitignore_parser import parse_gitignore
+            from gitignore_parser import parse_gitignore # Lazy import
             gitignore_path = Path(self.root) / '.gitignore'
             if gitignore_path.is_file():
-                with gitignore_path.open() as f:
-                    matches = parse_gitignore(f)
-                    return matches(path)
+                return parse_gitignore(gitignore_path)
         except ImportError:
-            # Silently ignore if gitignore_parser is not installed
-            pass
-        except Exception as e:
-            if self.verbose:
-                print(f"Warning: Error checking .gitignore for {path}: {e}", file=sys.stderr)
-        return False
+            pass # Silently ignore if gitignore_parser is not installed
+        except Exception:
+            pass # Silently ignore parsing errors
+        return lambda _: False # Return a function that never matches if no gitignore
 
     def _find_src_files(self, directory):
-        """Finds source files recursively, respecting ignores."""
-        import re # Import locally as it's only used here now
-
+        """Finds source code files recursively, respecting ignores."""
         src_files = []
         compiled_ignored_dirs = [re.compile(pattern) for pattern in IGNORED_DIRS]
+        gitignore_matcher = self._get_gitignore_matcher()
 
-        if not Path(directory).is_dir():
-            # Handle case where input is a single file
-            if Path(directory).is_file() and Path(directory).suffix.lower() not in BINARY_EXTS:
-                return [str(directory)]
+        root_path_obj = Path(directory)
+        if not root_path_obj.is_dir():
+            # Handle case where input is a single file (less common for repo mapping)
+            if root_path_obj.is_file() and \
+               root_path_obj.suffix.lower() not in BINARY_EXTS and \
+               not self._is_gitignored(str(root_path_obj), gitignore_matcher):
+                return [str(root_path_obj)]
             return []
 
         for root, dirs, files in os.walk(directory, topdown=True):
             root_path = Path(root)
-            # Filter ignored directories using compiled regex
+            # Filter ignored directories
             dirs[:] = [d for d in dirs if not (
-                d.startswith('.') or
-                any(pattern.search(d) for pattern in compiled_ignored_dirs)
+                d.startswith('.') or # Hidden dirs
+                any(pattern.search(d) for pattern in compiled_ignored_dirs) or # Pattern ignores
+                self._is_gitignored(str(root_path / d), gitignore_matcher) # Gitignored dirs
             )]
 
             for file in files:
                 file_path = root_path / file
-                # Check ignores: hidden, binary extension, gitignored
-                if (file.startswith('.') or
-                    file_path.suffix.lower() in BINARY_EXTS or
-                    self._is_gitignored(str(file_path))):
-                    continue
-                src_files.append(str(file_path))
+                # Check file ignores
+                if not (file.startswith('.') or # Hidden files
+                        file_path.suffix.lower() in BINARY_EXTS or # Binary extensions
+                        self._is_gitignored(str(file_path), gitignore_matcher)): # Gitignored files
+                    src_files.append(str(file_path))
 
         return src_files
 
-    def generate_map(self, chat_files=None, mentioned_files=None, mentioned_idents=None, force_refresh=None):
-        """Generates the repository map."""
-        chat_files = chat_files or []
-        mentioned_files = mentioned_files or []
-        mentioned_idents = set(mentioned_idents or [])
+    def generate_map(self, chat_files=None, force_refresh=None):
+        """Generates the repository map string."""
+        chat_files_abs = [os.path.abspath(os.path.join(self.root, f)) for f in (chat_files or [])]
+        # Filter chat files to ensure they exist and are files
+        chat_files_abs = [f for f in chat_files_abs if Path(f).is_file()]
+
         if force_refresh is not None:
-            self.repo_mapper.force_refresh = force_refresh # Update underlying mapper
+            self.repomap.force_refresh = force_refresh # Update underlying mapper if specified
 
-        self.map_generation_time = time.time()
-
-        # Resolve paths relative to root, ensuring they exist
-        def resolve_path(p):
-            abs_p = Path(self.root) / p
-            return str(abs_p.resolve()) if abs_p.exists() else None
-
-        chat_files_abs = [p for p in (resolve_path(f) for f in chat_files) if p]
-        mentioned_files_abs = [p for p in (resolve_path(f) for f in mentioned_files) if p]
-
-        # Find all potential source files in the repository
-        all_repo_files = self._find_src_files(self.root)
-        if not all_repo_files:
-            return "" # No files found
+        # Find all source files in the repository
+        all_repo_files_abs = self._find_src_files(self.root)
+        if not all_repo_files_abs:
+            return "" # No source files found
 
         # Separate files into chat context vs. others
         chat_files_set = set(chat_files_abs)
-        other_files_abs = [f for f in all_repo_files if f not in chat_files_set]
+        other_files_abs = [f for f in all_repo_files_abs if f not in chat_files_set]
 
         # Delegate map generation to the core RepoMap instance
-        return self.repo_mapper.get_repo_map(
+        # Pass absolute paths for both lists
+        return self.repomap.get_repo_map(
             chat_files=chat_files_abs,
             other_files=other_files_abs,
-            mentioned_fnames=mentioned_files_abs,
-            mentioned_idents=mentioned_idents,
         )
 
+    def get_related_files(self, target_files: List[str]) -> List[str]:
+        """Finds files referencing identifiers defined in target_files."""
+        # Resolve target files to absolute paths and filter for existing files
+        target_files_abs = [os.path.abspath(os.path.join(self.root, f)) for f in target_files]
+        target_files_abs = [f for f in target_files_abs if Path(f).is_file()]
+
+        if not target_files_abs:
+            return []
+
+        # Delegate to the core RepoMap instance, passing absolute paths
+        return self.repomap.get_related_files(target_fnames=target_files_abs)
+
+
     def render_cache(self):
-        """Renders all cached tags without ranking (for debugging)."""
+        """Renders all cached tags (for debugging)."""
         cache_path = Path(self.root) / TAGS_CACHE_DIR
-        if not cache_path.is_dir():
-            return ""
+        if not cache_path.exists():
+             print("Cache directory does not exist.", file=sys.stderr)
+             return ""
 
         all_tags = []
-        all_cached_fnames = set()
+        all_cached_rel_fnames = set()
         try:
-            cache = Cache(str(cache_path)) # Ensure path is string for Cache
-            for key in cache.iterkeys():
+            cache = Cache(str(cache_path))
+            for key in cache.iterkeys(): # Key should be abs_fname
                 try:
-                    abs_fname = key # Assuming key is the absolute filename
-                    if not Path(abs_fname).is_file(): continue # Skip non-files
+                    abs_fname = key
+                    if not Path(abs_fname).is_file(): continue
 
-                    all_cached_fnames.add(abs_fname)
+                    rel_fname = get_rel_fname(abs_fname, self.root)
+                    all_cached_rel_fnames.add(rel_fname)
                     cached_item = cache.get(key)
-                    if isinstance(cached_item, dict) and "data" in cached_item:
-                        all_tags.extend(cached_item.get("data", []))
-                except Exception as e:
-                    if self.verbose: print(f"Warning: Error processing cache key {key}: {e}", file=sys.stderr)
+                    # Check if item is dict and has 'data' which is a list (of tags)
+                    if isinstance(cached_item, dict) and isinstance(cached_item.get("data"), list):
+                        all_tags.extend(cached_item["data"]) # Add the list of tags
+                except Exception:
+                    pass # Ignore errors reading individual cache items
 
             cache.close()
 
-            # Use a temporary RepoMap instance for rendering logic
+            if not all_tags and not all_cached_rel_fnames:
+                print("Cache appears empty.", file=sys.stderr)
+                return ""
+
+            # Use a temporary RepoMap instance configured for rendering
+            # Use existing tokenizer from the main repomap instance
             temp_mapper = RepoMap(
                 root=self.root,
-                map_tokens=1_000_000, # Effectively unlimited for cache dump
+                map_tokens=1_000_000, # Unlimited tokens for dump
                 verbose=self.verbose,
-                tokenizer_name=self.repo_mapper.tokenizer.name, # Use same tokenizer
+                tokenizer_name=self.repomap.tokenizer.name,
             )
+            # Assign the collected tags to the temp mapper instance
+            temp_mapper._all_tags = all_tags
 
-            # Prepare items: all tags + filenames not represented by tags
-            tag_fnames = {tag.rel_fname for tag in all_tags}
-            all_cached_rel_fnames = {get_rel_fname(f, self.root) for f in all_cached_fnames}
-            files_only = all_cached_rel_fnames - tag_fnames
-            items_to_render = list(all_tags) + [(fname,) for fname in sorted(files_only)]
+            # Get relative filenames that had tags
+            tagged_rel_fnames = {tag[0] for tag in all_tags} # rel_fname is index 0
+            # Include files that were cached but might not have yielded tags
+            files_to_render = sorted(list(all_cached_rel_fnames))
 
-            return temp_mapper.to_tree(items_to_render, chat_rel_fnames=set())
+            # Call to_tree on the temp mapper with the list of all cached relative filenames
+            return temp_mapper.to_tree(files_to_render)
 
         except Exception as e:
-            if self.verbose: print(f"Error rendering cache: {e}", file=sys.stderr)
+            print(f"Error rendering cache: {e}", file=sys.stderr)
             return ""
 
 
 def main():
-    """Command line interface for standalone repomapper execution."""
+    """Command line interface for repomapper."""
     parser = argparse.ArgumentParser(description="Generate a repository map.")
-    parser.add_argument("--dir", required=True, help="Root directory of the repository.")
-    parser.add_argument("--map-tokens", type=int, default=4096, help="Target token limit for the map.")
-    parser.add_argument("--tokenizer", default="cl100k_base", help="Tiktoken tokenizer name.")
-    parser.add_argument("--force-refresh", action="store_true", help="Ignore cache and regenerate all tags.")
-    parser.add_argument("--verbose", action="store_true", help="Enable detailed output.")
-    parser.add_argument("--output", help="File path to write the map to (stdout if not specified).")
-    parser.add_argument("--render-cache", action="store_true", help="Render all cached tags instead of generating a ranked map.")
-    parser.add_argument("--chat-files", nargs='*', default=[], help="Files currently in chat context.")
-    parser.add_argument("--mentioned-files", nargs='*', default=[], help="Files mentioned for context.")
-    parser.add_argument("--mentioned-idents", nargs='*', default=[], help="Identifiers mentioned for context.")
+    parser.add_argument("dir", help="Root directory of the repository.")
+    parser.add_argument("--map-tokens", type=int, default=4096, help="Target token limit.")
+    parser.add_argument("--tokenizer", default="cl100k_base", help="Tiktoken tokenizer.")
+    parser.add_argument("--force-refresh", action="store_true", help="Ignore and overwrite cache.")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output.")
+    parser.add_argument("--output", help="Output file path (stdout if omitted).")
+    parser.add_argument("--render-cache", action="store_true", help="Render cached tags instead of map.")
+    parser.add_argument("--chat-files", nargs='*', default=[], help="Relative paths of files in chat context.")
 
     args = parser.parse_args()
+    root_path = Path(args.dir).resolve() # Resolve root path once
 
     try:
         mapper = RepoMapper(
-            root_dir=args.dir,
+            root_dir=str(root_path), # Pass resolved string path
             map_tokens=args.map_tokens,
             tokenizer=args.tokenizer,
             verbose=args.verbose,
-            force_refresh=args.force_refresh
+            force_refresh=args.force_refresh,
         )
 
+        content = ""
         if args.render_cache:
+            print("Rendering cached data...", file=sys.stderr)
             content = mapper.render_cache()
-            if content:
-                print("\n--- Rendered Cache Map ---", file=sys.stderr)
-                print(content) # Print cache content to stdout
-                print("--- End Rendered Cache Map ---", file=sys.stderr)
-            else:
-                print("Cache is empty or could not be rendered.", file=sys.stderr)
-            return
-
-        content = mapper.generate_map(
-            chat_files=args.chat_files,
-            mentioned_files=args.mentioned_files,
-            mentioned_idents=args.mentioned_idents
-        )
-
-        if content:
-            if args.output:
-                try:
-                    with open(args.output, "w", encoding="utf-8") as f:
-                        f.write(content)
-                    if args.verbose: print(f"Repository map written to: {args.output}", file=sys.stderr)
-                except IOError as e:
-                    print(f"Error writing map to {args.output}: {e}", file=sys.stderr)
-                    # Fallback to printing to stdout
-                    print("\n--- Repository Map ---")
-                    print(content)
-                    print("--- End Repository Map ---")
-            else:
-                # Print final map to stdout
-                print(content)
+            if not content:
+                print("Cache rendering produced no output.", file=sys.stderr)
+                return # Exit cleanly if cache is empty/unrenderable
         else:
-            print("Failed to generate repository map.", file=sys.stderr)
+            # Resolve chat file paths relative to the resolved root
+            # chat_files from args are relative paths
+            chat_files_abs = []
+            for f in args.chat_files:
+                 p = root_path / f
+                 # Check if it exists within the root directory before adding
+                 if p.is_file() and str(p.resolve()).startswith(str(root_path)):
+                     chat_files_abs.append(str(p.resolve())) # Use absolute path for generate_map
+                 elif args.verbose:
+                     print(f"Warning: Skipping chat file (not found or outside root): {f}", file=sys.stderr)
+
+            print("Generating repository map...", file=sys.stderr)
+            # Pass absolute chat file paths to generate_map
+            content = mapper.generate_map(chat_files=chat_files_abs)
+            if not content:
+                 print("Map generation produced no output.", file=sys.stderr)
+                 # Don't exit, allow empty output to be written/printed
+
+        # Output the result (either map or cache render)
+        if args.output:
+            try:
+                output_path = Path(args.output)
+                output_path.parent.mkdir(parents=True, exist_ok=True) # Ensure dir exists
+                output_path.write_text(content, encoding="utf-8")
+                if args.verbose: print(f"Output written to: {args.output}", file=sys.stderr)
+            except IOError as e:
+                print(f"Error writing output to {args.output}: {e}", file=sys.stderr, end="")
+                print(". Falling back to stdout.")
+                print(content) # Print to stdout on write error
+        else:
+            print(content) # Print to stdout if no output file specified
 
     except (ImportError, ValueError, FileNotFoundError) as e:
          print(f"Error: {e}", file=sys.stderr)
-         # Exit with non-zero status on critical errors
-         exit(1)
+         exit(1) # Exit on critical setup errors
     except Exception as e:
          print(f"An unexpected error occurred: {e}", file=sys.stderr)
          if args.verbose:
              import traceback
              traceback.print_exc(file=sys.stderr)
-         exit(1)
+         exit(1) # Exit on unexpected errors
 
 
 if __name__ == "__main__":

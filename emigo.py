@@ -343,7 +343,7 @@ class Emigo:
 
         if session_path not in self.sessions:
             # TODO: Get verbose setting properly if needed, defaulting to False for now
-            config_verbose = False # Placeholder
+            config_verbose = True
             self.sessions[session_path] = Context(session_path=session_path, verbose=config_verbose)
         return self.sessions[session_path]
 
