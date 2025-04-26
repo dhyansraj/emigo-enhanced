@@ -8,8 +8,6 @@ import json
 import time
 import traceback
 import os
-import warnings # Keep warnings for now if litellm still needs it, but remove filter
-from typing import List, Dict, Optional # Removed Union, Iterator
 
 # Import necessary components
 from utils import _filter_context, get_os_name
