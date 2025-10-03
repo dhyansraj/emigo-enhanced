@@ -196,20 +196,26 @@ Returns a formatted string with proper indentation and colors."
 (defun emigo-visual-start-thinking-indicator ()
   "Start the thinking indicator animation."
   (interactive)
+  (message "[DEBUG] emigo-visual-start-thinking-indicator called, show-indicator=%s" emigo-show-thinking-indicator)
   (when emigo-show-thinking-indicator
     (setq emigo-visual--thinking-frame 0)
     (setq emigo-visual--thinking-marker (point-marker))
+    (message "[DEBUG] Marker set at position: %s" (point))
     (insert "\n")
     (emigo-visual--update-thinking-indicator)
     (setq emigo-visual--thinking-timer
-          (run-with-timer 0.1 0.1 #'emigo-visual--update-thinking-indicator))))
+          (run-with-timer 0.1 0.1 #'emigo-visual--update-thinking-indicator))
+    (message "[DEBUG] Thinking indicator started")))
 
 (defun emigo-visual-stop-thinking-indicator ()
   "Stop and remove the thinking indicator."
   (interactive)
+  (message "[DEBUG] emigo-visual-stop-thinking-indicator called, timer=%s, marker=%s" 
+           emigo-visual--thinking-timer emigo-visual--thinking-marker)
   (when emigo-visual--thinking-timer
     (cancel-timer emigo-visual--thinking-timer)
-    (setq emigo-visual--thinking-timer nil))
+    (setq emigo-visual--thinking-timer nil)
+    (message "[DEBUG] Timer cancelled"))
   (when (and emigo-visual--thinking-marker
              (marker-buffer emigo-visual--thinking-marker))
     (with-current-buffer (marker-buffer emigo-visual--thinking-marker)
@@ -218,7 +224,8 @@ Returns a formatted string with proper indentation and colors."
           (goto-char emigo-visual--thinking-marker)
           (when (looking-at ".*\n")
             (delete-region (point) (1+ (line-end-position)))))))
-    (setq emigo-visual--thinking-marker nil)))
+    (setq emigo-visual--thinking-marker nil)
+    (message "[DEBUG] Thinking indicator removed")))
 
 ;;; Status Display
 
