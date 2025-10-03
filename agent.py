@@ -125,17 +125,10 @@ class Agent:
         """Calls the LLM, streams the response, and returns the full response text."""
         full_response = ""
         eval_in_emacs("emigo--flush-buffer", self.session_path, "\nAssistant:\n", "llm") # Signal start
-        # Start thinking indicator
-        eval_in_emacs("emigo--start-thinking", self.session_path)
         try:
             # Send the temporary list with context included
             response_stream = self.llm_client.send(messages_to_send, stream=True)
-            # Stop thinking indicator when first chunk arrives
-            first_chunk = True
             for chunk in response_stream:
-                if first_chunk:
-                    eval_in_emacs("emigo--stop-thinking", self.session_path)
-                    first_chunk = False
                 # Ensure chunk is a string, default to empty string if None
                 content_to_flush = chunk or ""
                 eval_in_emacs("emigo--flush-buffer", self.session_path, content_to_flush, "llm")
@@ -143,8 +136,6 @@ class Agent:
                     full_response += chunk
             return full_response
         except Exception as e:
-            # Stop thinking indicator on error
-            eval_in_emacs("emigo--stop-thinking", self.session_path)
             error_message = f"[Error during LLM communication: {e}]"
             print(f"\n{error_message}", file=sys.stderr)
             eval_in_emacs("emigo--flush-buffer", self.session_path, str(error_message), "error")

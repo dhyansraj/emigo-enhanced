@@ -318,18 +318,20 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
                               (insert "  ")
                               (insert (propertize "$ " 'face 'emigo-tool-call-border))
                               (insert (propertize command 'face '(:foreground "cyan" :weight bold)))))))))))
-            (error nil)))
-        nil)
-       
-       ((equal role "tool_json_end")
-        ;; Skip attempt_completion - don't show it
-        (unless (string= effective-tool-name "attempt_completion")
-          (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
-            (when buffer
-              (with-current-buffer buffer
-                (save-excursion
-                  (let ((inhibit-read-only t))
-                    (goto-char (point-max))
+          ;; tool_json: Start of tool call - accumulate and show fancy header
+   ((equal role "tool_json")
+    (setq emigo--tool-json-block content)
+    ;; If this is attempt_completion, stop the response indicator
+    (when (string= effective-tool-name "attempt_completion")
+      (emigo-visual-stop-thinking-indicator))
+    ;; Skip attempt_completion - don't show it
+    (unless (string= effective-tool-name "attempt_completion")
+      (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+        (when buffer
+          (with-current-buffer buffer
+            (save-excursion
+              (let ((inhibit-read-only t))
+{{ ... }}
                     (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
                       (forward-line -2)
                       (goto-char (line-end-position)))

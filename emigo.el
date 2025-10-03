@@ -632,6 +632,8 @@ If on a prompt line:
       (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
         (forward-char (length emigo-prompt-symbol))
         (delete-region (point) (point-max)))
+      ;; Start response indicator
+      (emigo-visual-start-thinking-indicator)
       (emigo-call-async "emigo_send" emigo-session-path prompt))))
 
 (defun emigo--flush-buffer (session-path content &optional role tool-id tool-name)
