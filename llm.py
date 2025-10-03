@@ -266,14 +266,22 @@ class LLMClient:
                 return response # Return the whole LiteLLM response object
 
         # Keep exception handling for non-streaming calls or errors *before* streaming starts
+        except litellm.AuthenticationError as e:
+             error_message = str(e)
+             print(f"\nAuthentication Error: {error_message}", file=sys.stderr)
+             # Return user-friendly error message
+             return "[LLM Error: Authentication failed. Please check your API key is set correctly.]"
         except litellm.APIConnectionError as e:
-             error_message = f"API Connection Error (pre-stream or non-stream): {e}"
-             print(f"\n{error_message}", file=sys.stderr)
-             # For non-streaming, return the error string
-             return f"[LLM Error: {error_message}]"
+             error_message = str(e)
+             print(f"\nAPI Connection Error: {error_message}", file=sys.stderr)
+             return f"[LLM Error: Cannot connect to API. Please check your internet connection.]"
+        except litellm.RateLimitError as e:
+             error_message = str(e)
+             print(f"\nRate Limit Error: {error_message}", file=sys.stderr)
+             return f"[LLM Error: Rate limit exceeded. Please wait a moment and try again.]"
         except Exception as e:
-             error_message = f"General Error (pre-stream or non-stream): {e}"
-             print(f"\n{error_message}", file=sys.stderr)
+             error_message = f"{type(e).__name__}: {e}"
+             print(f"\nGeneral Error: {error_message}", file=sys.stderr)
              # For non-streaming, return the error string
              return f"[LLM Error: {error_message}]"
 

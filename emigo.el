@@ -682,6 +682,13 @@ TOOL-NAME is provided explicitly when ROLE is 'tool_json'."
             (setq-local emigo--llm-output (concat emigo--llm-output content))
             (insert content))
 
+           ((equal role "error")
+            ;; Display errors prominently with red color and bold
+            (insert "\n")
+            (insert (propertize "⚠ Error: " 'face '(:foreground "red" :weight bold)))
+            (insert (propertize content 'face '(:foreground "red")))
+            (insert "\n"))
+
            (t (insert content)))
 
           ;; --- Update read-only region ---
