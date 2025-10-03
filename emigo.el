@@ -31,7 +31,6 @@
 (require 'subr-x)
 (require 'vc-git)
 (require 'emigo-epc)
-(require 'emigo-window)
 
 (defgroup emigo nil
   "Emigo group."
@@ -1225,6 +1224,8 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
       (message "No Emigo process buffer found"))))
 
 ;; Window management functions moved to emigo-window.el
+;; Load after core functions are defined to avoid circular dependency issues
+(require 'emigo-window)
 
 (provide 'emigo)
 ;;; emigo.el ends here
