@@ -433,19 +433,11 @@ def handle_interaction_request(request):
                             "content": tool_result_str
                         })
                         break # Stop processing further tools
-                    elif tool_result_str.startswith(TOOL_ERROR_PREFIX): # Use constant
-                        print(f"Worker: Tool {tool_name} failed. Ending interaction. Result: {tool_result_str}", file=sys.stderr)
-                        should_continue_interaction = False
-                         # Add the error result to history before breaking
-                        tool_results_for_history.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "name": tool_name,
-                            "content": tool_result_str
-                        })
-                        break # Stop processing further tools
-
-                    # --- If no signal, filter and prepare result for history ---
+                    # Note: Tool errors (TOOL_ERROR_PREFIX) are now treated as normal results
+                    # The LLM should see them and decide how to handle (retry, fix params, etc.)
+                    # Only COMPLETION and DENIED signals end the interaction
+                    
+                    # --- Filter and prepare result for history ---
                     filtered_tool_result = _filter_environment_details(tool_result_str)
                     tool_results_for_history.append({
                         "role": "tool",

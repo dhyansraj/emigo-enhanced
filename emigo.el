@@ -989,11 +989,12 @@ Handles potential errors and captures stdout/stderr."
       ;; Cleanup: kill the temporary buffer
       (when (buffer-live-p output-buffer)
         (kill-buffer output-buffer)))
-    ;; Check exit code - simplistic error handling for now
-    (unless (eq exit-code 0)
-      (error "Command failed with exit code %s: %s" exit-code command-string))
-    ;; Return the captured output
-    output))
+    ;; Return output with exit code info if non-zero
+    ;; Don't throw error - let LLM see the output and decide what to do
+    (if (eq exit-code 0)
+        output
+      ;; Non-zero exit: prepend exit code info to output
+      (format "[Exit code: %s]\n%s" exit-code output))))
 
 (defun emigo--list-files-sync (abs-path recursive-p)
   "List files in ABS-PATH, optionally RECURSIVE-P. Returns a newline-separated string."
