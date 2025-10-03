@@ -420,13 +420,9 @@ as the session path."
       (insert (propertize (concat "\n\n" emigo-prompt-symbol) 'face font-lock-keyword-face)))))
 
 ;; --- Window Variables (defined in emigo-window.el) ---
-;; Declared here for reference by core functions
-
-(defvar emigo-window nil
-  "The dedicated `emigo' window.")
-
-(defvar emigo-buffer nil
-  "The dedicated `emigo' buffer.")
+;; Forward declarations for variables defined in emigo-window.el
+(defvar emigo-window)
+(defvar emigo-buffer)
 
 (defun emigo-current-window-take-height (&optional window)
   "Return the height the `window' takes up.

@@ -16,9 +16,15 @@
 
 ;;; Code:
 
+;;; Variables
+
+(defvar emigo-window nil
+  "The dedicated `emigo' window.")
+
+(defvar emigo-buffer nil
+  "The dedicated `emigo' buffer.")
+
 ;; Forward declarations for variables from emigo.el
-(defvar emigo-window)
-(defvar emigo-buffer)
 (defvar emigo-epc-process)
 (defvar emigo-project-buffers)
 (defvar emigo-prompt-symbol)
