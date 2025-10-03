@@ -37,13 +37,17 @@ EmigoE is a fork of emigo with focus on better UX, cleaner interface, and develo
 - [ ] Test with multiple projects open simultaneously
 
 * Priority 2: Magit-style Interface
-** TODO Transient menu for settings
-- [ ] ~C-c e ?~ to show menu
-- [ ] Quick access to common operations
-- [ ] Add/remove files
-- [ ] Clear history
-- [ ] Restart process
-- [ ] Change model/settings
+** DONE Transient menu for settings
+- [X] ~C-c e ?~ (or ~C-c e m~) to show menu
+- [X] Quick access to common operations
+- [X] Add/remove files
+- [X] Clear history
+- [X] Restart process
+- [X] Window mode toggle
+- [X] Window width adjustment
+- [X] Settings toggles (auto-create, prevent-split)
+- [X] Help system (~?~ key)
+- [ ] Change model/settings (future enhancement)
 
 * Priority 3: Streaming & Visual Feedback
 ** TODO Handle async/streaming responses

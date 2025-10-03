@@ -1223,5 +1223,8 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
 ;; Load after core functions are defined to avoid circular dependency issues
 (require 'emigo-window)
 
+;; Transient menu interface
+(require 'emigo-transient)
+
 (provide 'emigo)
 ;;; emigo.el ends here
