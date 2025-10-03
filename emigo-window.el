@@ -348,8 +348,7 @@ Only switches when:
   "Enable automatic session switching when changing buffers."
   (interactive)
   (setq emigo--auto-switch-enabled t)
-  (add-hook 'buffer-list-update-hook #'emigo--auto-switch-session)
-  (message "[Emigo] Auto-switch enabled"))
+  (add-hook 'buffer-list-update-hook #'emigo--auto-switch-session))
 
 (defun emigo-disable-auto-switch ()
   "Disable automatic session switching."

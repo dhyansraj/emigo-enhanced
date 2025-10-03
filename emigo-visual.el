@@ -2,8 +2,6 @@
 
 ;; Copyright (C) 2025, EmigoE, all rights reserved.
 
-;; DEBUG: Confirm file is being loaded
-(message "[Emigo Visual] Loading emigo-visual.el...")
 
 ;; Author: dhyansraj
 ;; Keywords: visual feedback ui
@@ -362,8 +360,7 @@ Makes completion text bright white and bold without box decorations."
 (defun emigo-visual--apply-advice ()
   "Apply visual enhancements advice to emigo functions."
   (advice-add 'emigo--flush-buffer :around #'emigo-visual--flush-buffer-advice)
-  (advice-add 'emigo--signal-completion :around #'emigo-visual--signal-completion-advice)
-  (message "[Emigo Visual] Advice applied to emigo--flush-buffer and emigo--signal-completion"))
+  (advice-add 'emigo--signal-completion :around #'emigo-visual--signal-completion-advice))
 
 (defun emigo-visual--remove-advice ()
   "Remove visual enhancements advice from emigo functions."
