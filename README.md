@@ -2,13 +2,25 @@
   <img style='height: auto; width: 35%; object-fit: contain' src="./Emigo.png">
 </p>
 
-# Emigo: Future of Agentic Development in Emacs
+# Emigo Enhanced: Agentic Development in Emacs with Better UX
 
-Emigo intends to be an intelligent, agentic Emacs-native AI assistant that understands and interacts with your codebase. Brought to you by the creators of [Emacs Application Framework](https://github.com/emacs-eaf/emacs-application-framework) and [lsp-bridge](https://github.com/manateelazycat/lsp-bridge), built on the shoulders of giants like [Cursor](https://www.cursor.com/en), [Aider](https://github.com/paul-gauthier/aider) and [Cline](https://github.com/sturdy-dev/cline), Emigo is the spiritual successor to [Aidermacs](https://github.com/MatthewZMD/aidermacs), reimagined from the ground up for Emacs.
+**Emigo Enhanced** is a fork of [Emigo](https://github.com/MatthewZMD/emigo) with significant UX improvements, better error handling, and developer-friendly features. Built on top of the excellent foundation by the creators of [Emacs Application Framework](https://github.com/emacs-eaf/emacs-application-framework) and [lsp-bridge](https://github.com/manateelazycat/lsp-bridge).
 
-## ⚠️ Emigo is under *very* active development, experimentation, and rapid-prototyping ⚠️
+## ✨ What's New in Emigo Enhanced
 
-The project is at its early-stage. Expect frequent breaking changes and unstable features. Please use only for testing, try it out and report issues - your feedback helps shape Emigo!
+- **🎨 Visual Feedback**: Claude Code-style tool call display with syntax highlighting
+- **⚡ Response Indicator**: Animated spinner shows when AI is working
+- **🛡️ Better Error Handling**: Clear, actionable error messages with fix suggestions
+- **🎯 Command Preview**: See `$ command` before execution
+- **⚙️ Transient Menu**: Interactive menu for all settings and actions
+- **🚀 Auto-Approve**: Optional automatic command execution
+- **📊 Tool Call Display**: Beautiful formatting for all tool interactions
+
+All features are **backward compatible** with upstream Emigo. See [INSTALL.md](INSTALL.md) for setup instructions.
+
+## ⚠️ Status
+
+Emigo is under active development. This fork adds stability and UX improvements while staying compatible with upstream.
 
 ## Key Features
 
