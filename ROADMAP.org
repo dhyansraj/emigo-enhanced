@@ -50,9 +50,12 @@ EmigoE is a fork of emigo with focus on better UX, cleaner interface, and develo
 - [ ] Change model/settings (future enhancement)
 
 * Priority 3: Streaming & Visual Feedback
-** TODO Handle async/streaming responses
-- [ ] Visual indicator when AI is thinking
-- [ ] Show streaming text in real-time
+** IN-PROGRESS Handle async/streaming responses
+- [X] Claude Code-style tool call display
+- [X] Formatted JSON arguments with syntax highlighting
+- [X] Box-drawing characters for visual appeal
+- [ ] Visual indicator when AI is thinking (implemented, needs Python integration)
+- [X] Show streaming text in real-time (already working)
 - [ ] Clear indication when response is complete
 - [ ] Progress bar for long operations
 

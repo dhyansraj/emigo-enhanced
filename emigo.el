@@ -953,22 +953,28 @@ Handles potential errors and captures stdout/stderr."
     (error "Invalid session path for command execution: %s" session-path))
   (let ((default-directory session-path) ;; Execute in the session path
         (output-buffer (generate-new-buffer "*emigo-cmd-output*"))
-        (error-output "")
-        (exit-code nil))
+        (output "")
+        (exit-code nil)
+        (max-output-size 100000)) ;; Limit output to ~100KB
     (unwind-protect
         (progn
           ;; Use call-process-shell-command to capture output
           (setq exit-code (call-process-shell-command command-string nil output-buffer t))
-          (with-current-buffer output-buffer
-            (buffer-string)))
+          ;; Capture output before cleanup, with size limit
+          (setq output (with-current-buffer output-buffer
+                         (let ((full-output (buffer-string)))
+                           (if (> (length full-output) max-output-size)
+                               (concat (substring full-output 0 max-output-size)
+                                       "\n... [output truncated, too large]")
+                             full-output)))))
       ;; Cleanup: kill the temporary buffer
       (when (buffer-live-p output-buffer)
         (kill-buffer output-buffer)))
     ;; Check exit code - simplistic error handling for now
     (unless (eq exit-code 0)
       (error "Command failed with exit code %s: %s" exit-code command-string))
-    ;; Return the captured output (already done by progn)
-    ))
+    ;; Return the captured output
+    output))
 
 (defun emigo--list-files-sync (abs-path recursive-p)
   "List files in ABS-PATH, optionally RECURSIVE-P. Returns a newline-separated string."
@@ -1225,6 +1231,9 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
 
 ;; Transient menu interface
 (require 'emigo-transient)
+
+;; Visual enhancements - applies advice to flush-buffer and signal-completion
+(require 'emigo-visual)
 
 (provide 'emigo)
 ;;; emigo.el ends here
