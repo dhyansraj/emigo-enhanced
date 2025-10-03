@@ -166,8 +166,12 @@ Returns a formatted string with proper indentation and colors."
 (defvar-local emigo-visual--thinking-marker nil
   "Marker for the thinking indicator position.")
 
-(defvar-local emigo-visual--thinking-dots 0
-  "Current number of dots in thinking indicator.")
+(defvar-local emigo-visual--thinking-frame 0
+  "Current frame of thinking indicator animation.")
+
+(defconst emigo-visual--spinner-frames
+  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+  "Spinner animation frames.")
 
 (defun emigo-visual--update-thinking-indicator ()
   "Update the thinking indicator animation."
@@ -180,22 +184,25 @@ Returns a formatted string with proper indentation and colors."
           ;; Clear previous indicator
           (when (looking-at ".*\n")
             (delete-region (point) (line-end-position)))
-          ;; Insert new indicator
-          (setq emigo-visual--thinking-dots (1+ (mod emigo-visual--thinking-dots 4)))
+          ;; Insert new indicator with spinner
+          (setq emigo-visual--thinking-frame 
+                (mod (1+ emigo-visual--thinking-frame) 
+                     (length emigo-visual--spinner-frames)))
           (insert (propertize
-                   (format "Thinking%s" (make-string emigo-visual--thinking-dots ?.))
+                   (format "%s Thinking..." 
+                           (aref emigo-visual--spinner-frames emigo-visual--thinking-frame))
                    'face 'emigo-thinking-indicator)))))))
 
 (defun emigo-visual-start-thinking-indicator ()
   "Start the thinking indicator animation."
   (interactive)
   (when emigo-show-thinking-indicator
-    (setq emigo-visual--thinking-dots 0)
+    (setq emigo-visual--thinking-frame 0)
     (setq emigo-visual--thinking-marker (point-marker))
     (insert "\n")
     (emigo-visual--update-thinking-indicator)
     (setq emigo-visual--thinking-timer
-          (run-with-timer 0.5 0.5 #'emigo-visual--update-thinking-indicator))))
+          (run-with-timer 0.1 0.1 #'emigo-visual--update-thinking-indicator))))
 
 (defun emigo-visual-stop-thinking-indicator ()
   "Stop and remove the thinking indicator."
