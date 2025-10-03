@@ -331,23 +331,52 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
           (with-current-buffer buffer
             (save-excursion
               (let ((inhibit-read-only t))
-{{ ... }}
-                    (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
-                      (forward-line -2)
-                      (goto-char (line-end-position)))
-                    ;; Insert formatted JSON args (pass effective-tool-name for execute_command)
-                    (let ((formatted (emigo-visual--format-json-args emigo--tool-json-block effective-tool-name)))
-                      (insert formatted))
-                    (insert "\n")
-                    ;; Insert footer
-                    (insert (emigo-visual--format-tool-call-footer))
-                    (setq emigo--tool-json-block ""))))))
-        ;; Clear the block and tool name even if we skipped display
-        (setq emigo--tool-json-block "")
-        (setq emigo--current-tool-name nil)
-        nil)))
-      ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
-      (funcall orig-fun session-path content role tool-id tool-name))))
+                (goto-char (point-max))
+                (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+                  (forward-line -2)
+                  (goto-char (line-end-position)))
+                ;; Insert fancy header
+                (insert (emigo-visual--format-tool-call-header (or effective-tool-name "(unknown)")))
+                ;; For execute_command, show the command immediately if we can parse it
+                (when (string= effective-tool-name "execute_command")
+                  (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                  (insert "  ")
+                  (insert (propertize "Executing command..." 'face '(:foreground "cyan" :weight bold)))
+                  (insert "\n")))))))
+    nil)
+   
+   ((equal role "tool_json_args")
+    (setq emigo--tool-json-block (concat emigo--tool-json-block content))
+    ;; Try to parse and display command if we have enough JSON
+    (when (and (string= effective-tool-name "execute_command")
+               (string-match-p "\"command\"" emigo--tool-json-block)
+               (string-suffix-p "}" emigo--tool-json-block))
+      (condition-case nil
+          (let* ((json-data (json-parse-string emigo--tool-json-block :object-type 'alist))
+                 (command (alist-get 'command json-data)))
+            (when command
+              (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+                (when buffer
+                  (with-current-buffer buffer
+                    (save-excursion
+                      (let ((inhibit-read-only t))
+                        (goto-char (point-max))
+                        (when (search-backward "Executing command..." nil t)
+                          (beginning-of-line)
+                          (kill-line)
+                          (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                          (insert "  ")
+                          (insert (propertize "$ " 'face 'emigo-tool-call-border))
+                          (insert (propertize command 'face '(:foreground "cyan" :weight bold)))))))))))
+        (error nil)))
+    nil)
+   
+   ((equal role "tool_json_end")
+    (setq emigo--tool-json-block "")
+    (setq emigo--current-tool-name nil)
+    nil))
+    ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
+    (funcall orig-fun session-path content role tool-id tool-name))))))))
 
 (defun emigo-visual--signal-completion-advice (orig-fun session-path result-text command-string)
   "Advice for emigo--signal-completion to style completion text.
