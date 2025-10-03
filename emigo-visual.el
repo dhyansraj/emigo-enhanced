@@ -372,9 +372,9 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
    ((equal role "tool_json_end")
     (setq emigo--tool-json-block "")
     (setq emigo--current-tool-name nil)
-    nil))
-    ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
-    (funcall orig-fun session-path content role tool-id tool-name))))))))
+    nil)))
+      ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
+      (funcall orig-fun session-path content role tool-id tool-name)))))))
 
 (defun emigo-visual--signal-completion-advice (orig-fun session-path result-text command-string)
   "Advice for emigo--signal-completion to style completion text.
