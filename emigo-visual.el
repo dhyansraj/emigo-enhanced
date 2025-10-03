@@ -96,13 +96,15 @@ Returns a formatted string with proper indentation and colors."
       (let* ((json-data (json-parse-string json-string :object-type 'alist))
              (formatted-lines '())
              (command-value nil))
+        ;; First pass: build formatted lines and extract command if present
         (dolist (pair json-data)
           (let* ((key (symbol-name (car pair)))
                  (value (cdr pair))
                  (value-str (cond
                             ((stringp value) 
                              ;; Save command value for execute_command
-                             (when (and (string= tool-name "execute_command")
+                             (when (and tool-name 
+                                       (string= tool-name "execute_command")
                                        (string= key "command"))
                                (setq command-value value))
                              (format "\"%s\"" value))
@@ -118,15 +120,21 @@ Returns a formatted string with proper indentation and colors."
                        (propertize ": " 'face 'emigo-tool-call-border)
                        (propertize value-str 'face 'emigo-tool-call-values))))
             (push line formatted-lines)))
-        ;; If this is execute_command, prepend the command being executed
-        (when (and (string= tool-name "execute_command") command-value)
-          (push (concat
-                 (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border)
-                 "  "
-                 (propertize "$ " 'face 'emigo-tool-call-border)
-                 (propertize command-value 'face '(:foreground "cyan" :weight bold)))
-                formatted-lines))
-        (mapconcat 'identity (nreverse formatted-lines) "\n"))
+        
+        ;; Reverse to get correct order
+        (setq formatted-lines (nreverse formatted-lines))
+        
+        ;; If this is execute_command and we found a command, prepend it at the TOP
+        (when (and tool-name (string= tool-name "execute_command") command-value)
+          (setq formatted-lines
+                (cons (concat
+                       (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border)
+                       "  "
+                       (propertize "$ " 'face 'emigo-tool-call-border)
+                       (propertize command-value 'face '(:foreground "cyan" :weight bold)))
+                      formatted-lines)))
+        
+        (mapconcat 'identity formatted-lines "\n"))
     (error
      ;; If JSON parsing fails, return the raw string with basic formatting
      (concat

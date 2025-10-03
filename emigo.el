@@ -802,26 +802,39 @@ The file path is relative to the session directory."
 
 ;; --- Tool Execution & Interaction Handlers (Called from Python) ---
 
+(defcustom emigo-auto-approve-commands nil
+  "If non-nil, automatically approve execute_command tool without prompting."
+  :type 'boolean
+  :group 'emigo)
+
 (defun emigo--request-tool-approval-sync (session-path tool-name params-json-string)
   "Ask the user for approval to execute TOOL-NAME with PARAMS-JSON-STRING.
 Return t if approved, nil otherwise. Called synchronously by the agent.
 PARAMS-JSON-STRING is expected to be a JSON string representing the parameters dictionary."
   (interactive) ;; For testing, remove later if only called programmatically
-  (let* ((param-alist (ignore-errors (json-parse-string params-json-string :object-type 'alist))) ;; Parse JSON string into an alist
-         (prompt-message
-          (format "[Emigo Approval] Allow tool '%s' for session '%s'?\nParams:\n%s\nApprove? (y or n) "
-                  tool-name
-                  session-path
-                  (if (listp param-alist) ;; Check if parsing succeeded and resulted in a list (alist)
-                      (mapconcat (lambda (pair) (format "- %s: %S" (car pair) (cdr pair))) param-alist "\n")
-                    (format "Invalid JSON parameters received: %s" params-json-string))))) ;; Show raw string if JSON parsing failed
-    ;; Only proceed if parsing was successful
-    (if (listp param-alist)
-        (y-or-n-p prompt-message)
-      ;; If parsing failed, display error and deny automatically
-      (message "%s" prompt-message)
-      (ding)
-      nil)))
+  
+  ;; Auto-approve execute_command if configured
+  (if (and emigo-auto-approve-commands
+           (string= tool-name "execute_command"))
+      (progn
+        (message "[Emigo] Auto-approved command execution")
+        t)
+    ;; Otherwise, ask for approval
+    (let* ((param-alist (ignore-errors (json-parse-string params-json-string :object-type 'alist))) ;; Parse JSON string into an alist
+           (prompt-message
+            (format "[Emigo Approval] Allow tool '%s' for session '%s'?\nParams:\n%s\nApprove? (y or n) "
+                    tool-name
+                    session-path
+                    (if (listp param-alist) ;; Check if parsing succeeded and resulted in a list (alist)
+                        (mapconcat (lambda (pair) (format "- %s: %S" (car pair) (cdr pair))) param-alist "\n")
+                      (format "Invalid JSON parameters received: %s" params-json-string))))) ;; Show raw string if JSON parsing failed
+      ;; Only proceed if parsing was successful
+      (if (listp param-alist)
+          (y-or-n-p prompt-message)
+        ;; If parsing failed, display error and deny automatically
+        (message "%s" prompt-message)
+        (ding)
+        nil))))
 
 (defun emigo--ask-user-sync (session-path question options-json-string)
   "Ask the user QUESTION in the context of SESSION-PATH.

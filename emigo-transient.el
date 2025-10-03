@@ -26,6 +26,7 @@
 (defvar emigo-window-width)
 (defvar emigo-auto-create-sessions)
 (defvar emigo-prevent-window-split)
+(defvar emigo-auto-approve-commands)
 
 ;; Forward declarations for functions
 (declare-function emigo-add-file-to-context "emigo")
@@ -93,6 +94,17 @@
   (message "[Emigo] Prevent window split: %s"
            (if emigo-prevent-window-split "enabled" "disabled")))
 
+(defun emigo-transient-toggle-auto-approve ()
+  "Toggle auto-approve commands setting."
+  (interactive)
+  (setq emigo-auto-approve-commands (not emigo-auto-approve-commands))
+  (message "[Emigo] Auto-approve commands: %s"
+           (if emigo-auto-approve-commands "enabled" "disabled")))
+
+(defun emigo-transient--get-auto-approve-status ()
+  "Get auto-approve commands status as string."
+  (if emigo-auto-approve-commands "ON" "OFF"))
+
 ;;; Main Transient Menu
 
 ;;;###autoload (autoload 'emigo-transient-menu "emigo-transient" nil t)
@@ -119,13 +131,21 @@
     ("-" "Decrease width" emigo-transient-decrease-width :transient t)
     ("=" "Set width" emigo-transient-set-width :transient t)]
    ["Settings"
-    :description
-    (lambda ()
-      (format "Settings  [Auto-create: %s | Prevent-split: %s]"
-              (propertize (emigo-transient--get-auto-create-status) 'face 'transient-value)
-              (propertize (emigo-transient--get-prevent-split-status) 'face 'transient-value)))
-    ("a" "Toggle auto-create sessions" emigo-transient-toggle-auto-create :transient t)
-    ("p" "Toggle prevent split" emigo-transient-toggle-prevent-split :transient t)]
+    ("a"
+     (lambda ()
+       (format "Toggle auto-create sessions [%s]"
+               (propertize (emigo-transient--get-auto-create-status) 'face 'transient-value)))
+     emigo-transient-toggle-auto-create :transient t)
+    ("p"
+     (lambda ()
+       (format "Toggle prevent split [%s]"
+               (propertize (emigo-transient--get-prevent-split-status) 'face 'transient-value)))
+     emigo-transient-toggle-prevent-split :transient t)
+    ("A"
+     (lambda ()
+       (format "Toggle auto-approve commands [%s]"
+               (propertize (emigo-transient--get-auto-approve-status) 'face 'transient-value)))
+     emigo-transient-toggle-auto-approve :transient t)]
    ["Actions"
     ("q" "Quit" transient-quit-one)
     ("?" "Help" emigo-transient-help)]])
@@ -154,7 +174,8 @@
     (princ "  = - Set width: Set window width to a specific value\n\n")
     (princ "Settings:\n")
     (princ "  a - Toggle auto-create: Enable/disable automatic session creation\n")
-    (princ "  p - Toggle prevent split: Enable/disable window split prevention\n\n")
+    (princ "  p - Toggle prevent split: Enable/disable window split prevention\n")
+    (princ "  A - Toggle auto-approve: Enable/disable automatic command approval\n\n")
     (princ "Actions:\n")
     (princ "  q - Quit: Close the transient menu\n")
     (princ "  ? - Help: Show this help buffer\n\n")
