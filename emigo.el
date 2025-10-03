@@ -748,23 +748,6 @@ Skip the dedicated Emigo window when cycling."
 
 ;; --- End Window Management Advice ---
 
-;; --- Thinking Indicator Wrappers ---
-
-(defun emigo--start-thinking (session-path)
-  "Start thinking indicator for SESSION-PATH buffer."
-  (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
-    (when buffer
-      (with-current-buffer buffer
-        (save-excursion
-          (goto-char (point-max))
-          (emigo-visual-start-thinking-indicator))))))
-
-(defun emigo--stop-thinking (session-path)
-  "Stop thinking indicator for SESSION-PATH buffer."
-  (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
-    (when buffer
-      (with-current-buffer buffer
-        (emigo-visual-stop-thinking-indicator)))))
 
 (defun emigo-add-file-to-context ()
   "Interactively add a file to the current project's Emigo chat context.

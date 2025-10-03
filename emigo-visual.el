@@ -166,12 +166,8 @@ Returns a formatted string with proper indentation and colors."
 (defvar-local emigo-visual--thinking-marker nil
   "Marker for the thinking indicator position.")
 
-(defvar-local emigo-visual--thinking-frame 0
-  "Current frame of thinking indicator animation.")
-
-(defconst emigo-visual--spinner-frames
-  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Spinner animation frames.")
+(defvar-local emigo-visual--thinking-dots 0
+  "Current number of dots in thinking indicator.")
 
 (defun emigo-visual--update-thinking-indicator ()
   "Update the thinking indicator animation."
@@ -184,38 +180,29 @@ Returns a formatted string with proper indentation and colors."
           ;; Clear previous indicator
           (when (looking-at ".*\n")
             (delete-region (point) (line-end-position)))
-          ;; Insert new indicator with spinner
-          (setq emigo-visual--thinking-frame 
-                (mod (1+ emigo-visual--thinking-frame) 
-                     (length emigo-visual--spinner-frames)))
+          ;; Insert new indicator
+          (setq emigo-visual--thinking-dots (1+ (mod emigo-visual--thinking-dots 4)))
           (insert (propertize
-                   (format "%s Thinking..." 
-                           (aref emigo-visual--spinner-frames emigo-visual--thinking-frame))
+                   (format "Thinking%s" (make-string emigo-visual--thinking-dots ?.))
                    'face 'emigo-thinking-indicator)))))))
 
 (defun emigo-visual-start-thinking-indicator ()
   "Start the thinking indicator animation."
   (interactive)
-  (message "[DEBUG] emigo-visual-start-thinking-indicator called, show-indicator=%s" emigo-show-thinking-indicator)
   (when emigo-show-thinking-indicator
-    (setq emigo-visual--thinking-frame 0)
+    (setq emigo-visual--thinking-dots 0)
     (setq emigo-visual--thinking-marker (point-marker))
-    (message "[DEBUG] Marker set at position: %s" (point))
     (insert "\n")
     (emigo-visual--update-thinking-indicator)
     (setq emigo-visual--thinking-timer
-          (run-with-timer 0.1 0.1 #'emigo-visual--update-thinking-indicator))
-    (message "[DEBUG] Thinking indicator started")))
+          (run-with-timer 0.5 0.5 #'emigo-visual--update-thinking-indicator))))
 
 (defun emigo-visual-stop-thinking-indicator ()
   "Stop and remove the thinking indicator."
   (interactive)
-  (message "[DEBUG] emigo-visual-stop-thinking-indicator called, timer=%s, marker=%s" 
-           emigo-visual--thinking-timer emigo-visual--thinking-marker)
   (when emigo-visual--thinking-timer
     (cancel-timer emigo-visual--thinking-timer)
-    (setq emigo-visual--thinking-timer nil)
-    (message "[DEBUG] Timer cancelled"))
+    (setq emigo-visual--thinking-timer nil))
   (when (and emigo-visual--thinking-marker
              (marker-buffer emigo-visual--thinking-marker))
     (with-current-buffer (marker-buffer emigo-visual--thinking-marker)
@@ -224,8 +211,7 @@ Returns a formatted string with proper indentation and colors."
           (goto-char emigo-visual--thinking-marker)
           (when (looking-at ".*\n")
             (delete-region (point) (1+ (line-end-position)))))))
-    (setq emigo-visual--thinking-marker nil)
-    (message "[DEBUG] Thinking indicator removed")))
+    (setq emigo-visual--thinking-marker nil)))
 
 ;;; Status Display
 
@@ -261,7 +247,6 @@ MODEL-INFO: string like \"gpt-4\""
 (defun emigo-visual--flush-buffer-advice (orig-fun session-path content &optional role tool-id tool-name)
   "Advice for emigo--flush-buffer to add visual enhancements.
 Intercepts tool calls to apply fancy formatting instead of plain text."
-  (message "[DEBUG ADVICE] Called with role=%s, tool-name=%s, content-length=%d" role tool-name (length content))
   ;; Save tool-name when we get it (in tool_json), use it for subsequent calls
   (when (and (equal role "tool_json") tool-name)
     (setq emigo--current-tool-name tool-name))
@@ -319,62 +304,34 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
                               (insert "  ")
                               (insert (propertize "$ " 'face 'emigo-tool-call-border))
                               (insert (propertize command 'face '(:foreground "cyan" :weight bold)))))))))))
-          ;; tool_json: Start of tool call - accumulate and show fancy header
-   ((equal role "tool_json")
-    (setq emigo--tool-json-block content)
-    ;; Skip attempt_completion - don't show it
-    (unless (string= effective-tool-name "attempt_completion")
-      (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
-        (when buffer
-          (with-current-buffer buffer
-            (save-excursion
-              (let ((inhibit-read-only t))
-                (goto-char (point-max))
-                (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
-                  (forward-line -2)
-                  (goto-char (line-end-position)))
-                ;; Insert fancy header
-                (insert (emigo-visual--format-tool-call-header (or effective-tool-name "(unknown)")))
-                ;; For execute_command, show the command immediately if we can parse it
-                (when (string= effective-tool-name "execute_command")
-                  (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
-                  (insert "  ")
-                  (insert (propertize "Executing command..." 'face '(:foreground "cyan" :weight bold)))
-                  (insert "\n")))))))
-    nil)
-   
-   ((equal role "tool_json_args")
-    (setq emigo--tool-json-block (concat emigo--tool-json-block content))
-    ;; Try to parse and display command if we have enough JSON
-    (when (and (string= effective-tool-name "execute_command")
-               (string-match-p "\"command\"" emigo--tool-json-block)
-               (string-suffix-p "}" emigo--tool-json-block))
-      (condition-case nil
-          (let* ((json-data (json-parse-string emigo--tool-json-block :object-type 'alist))
-                 (command (alist-get 'command json-data)))
-            (when command
-              (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
-                (when buffer
-                  (with-current-buffer buffer
-                    (save-excursion
-                      (let ((inhibit-read-only t))
-                        (goto-char (point-max))
-                        (when (search-backward "Executing command..." nil t)
-                          (beginning-of-line)
-                          (kill-line)
-                          (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
-                          (insert "  ")
-                          (insert (propertize "$ " 'face 'emigo-tool-call-border))
-                          (insert (propertize command 'face '(:foreground "cyan" :weight bold)))))))))))
-        (error nil)))
-    nil)
-   
-   ((equal role "tool_json_end")
-    (setq emigo--tool-json-block "")
-    (setq emigo--current-tool-name nil)
-    nil)))
+            (error nil)))
+        nil)
+       
+       ((equal role "tool_json_end")
+        ;; Skip attempt_completion - don't show it
+        (unless (string= effective-tool-name "attempt_completion")
+          (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+            (when buffer
+              (with-current-buffer buffer
+                (save-excursion
+                  (let ((inhibit-read-only t))
+                    (goto-char (point-max))
+                    (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+                      (forward-line -2)
+                      (goto-char (line-end-position)))
+                    ;; Insert formatted JSON args (pass effective-tool-name for execute_command)
+                    (let ((formatted (emigo-visual--format-json-args emigo--tool-json-block effective-tool-name)))
+                      (insert formatted))
+                    (insert "\n")
+                    ;; Insert footer
+                    (insert (emigo-visual--format-tool-call-footer))
+                    (setq emigo--tool-json-block ""))))))
+        ;; Clear the block and tool name even if we skipped display
+        (setq emigo--tool-json-block "")
+        (setq emigo--current-tool-name nil)
+        nil)))
       ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
-      (funcall orig-fun session-path content role tool-id tool-name)))))))
+      (funcall orig-fun session-path content role tool-id tool-name))))
 
 (defun emigo-visual--signal-completion-advice (orig-fun session-path result-text command-string)
   "Advice for emigo--signal-completion to style completion text.
