@@ -24,10 +24,6 @@
 (defvar emigo-prompt-symbol)
 
 ;; Forward declarations for functions from emigo.el
-(declare-function emigo--is-emigo-buffer-p "emigo")
-(declare-function emigo-exist-p "emigo")
-(declare-function emigo-window-exist-p "emigo")
-(declare-function emigo-buffer-exist-p "emigo")
 (declare-function emigo-close "emigo")
 (declare-function emigo-mode "emigo")
 (declare-function emigo-update-header-line "emigo")
@@ -35,6 +31,26 @@
 (declare-function emigo-epc-live-p "emigo-epc")
 
 (require 'vc-git)
+
+;;; Utility Functions
+
+(defun emigo--is-emigo-buffer-p (&optional buffer)
+  "Return non-nil if BUFFER (defaults to current) is an Emigo buffer."
+  (with-current-buffer (or buffer (current-buffer))
+    (string-match-p "^\\*emigo:.*\\*$" (buffer-name))))
+
+(defun emigo-window-exist-p (window)
+  "Return non-nil if WINDOW exists and is live."
+  (and window (window-live-p window)))
+
+(defun emigo-buffer-exist-p (buffer)
+  "Return non-nil if BUFFER exists and is live."
+  (and buffer (buffer-live-p buffer)))
+
+(defun emigo-exist-p ()
+  "Return non-nil if both emigo buffer and window exist."
+  (and (emigo-buffer-exist-p emigo-buffer)
+       (emigo-window-exist-p emigo-window)))
 
 ;;; Customization
 
