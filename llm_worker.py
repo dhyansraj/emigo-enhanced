@@ -201,102 +201,110 @@ def handle_interaction_request(request):
                 # Call llm_client directly, enabling streaming and passing tools
                 response_stream = llm_client.send(messages_to_send, **completion_args)
 
-                # Stream text chunks and accumulate tool calls
-                for chunk in response_stream:
-                    # --- Check for stream error marker ---
-                    if isinstance(chunk, dict) and chunk.get("_stream_error"):
-                        llm_error_occurred = True
-                        error_message = f"[Error during LLM streaming: {chunk.get('error_message', 'Unknown stream error')}]"
-                        print(f"\n{error_message}", file=sys.stderr) # Print detailed error
-                        stream_to_main_process(error_message, "error") # Send simplified error
-                        # Add error to local history for this interaction attempt
-                        interaction_history.append({"role": "assistant", "content": error_message})
-                        break # Exit the stream processing loop
+                # Check if response is an error string instead of a stream
+                if isinstance(response_stream, str) and response_stream.startswith("[LLM Error:"):
+                    llm_error_occurred = True
+                    print(f"\n{response_stream}", file=sys.stderr)
+                    stream_to_main_process(response_stream, "error")
+                    interaction_history.append({"role": "assistant", "content": response_stream})
+                    # Don't try to iterate - it's not a stream, skip to end
+                elif response_stream:  # Only iterate if we have a valid stream
+                    # Stream text chunks and accumulate tool calls
+                    for chunk in response_stream:
+                        # --- Check for stream error marker ---
+                        if isinstance(chunk, dict) and chunk.get("_stream_error"):
+                            llm_error_occurred = True
+                            error_message = f"[Error during LLM streaming: {chunk.get('error_message', 'Unknown stream error')}]"
+                            print(f"\n{error_message}", file=sys.stderr) # Print detailed error
+                            stream_to_main_process(error_message, "error") # Send simplified error
+                            # Add error to local history for this interaction attempt
+                            interaction_history.append({"role": "assistant", "content": error_message})
+                            break # Exit the stream processing loop
 
-                    # --- Safely access delta ---
-                    delta = None
-                    try:
-                        # Ensure chunk is not the error marker before accessing choices/delta
-                        if chunk and not isinstance(chunk, dict) and hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
-                             # Access delta safely
-                             if hasattr(chunk.choices[0], 'delta'):
-                                 delta = chunk.choices[0].delta
-                             else:
-                                 # print(f"  - Skipping chunk choice missing 'delta': {chunk.choices[0]}", file=sys.stderr)
-                                 continue # Skip choice if delta is missing
-                        else:
-                            # Log unexpected chunk structure if needed, but don't stop
-                            # print(f"  - Skipping chunk with unexpected structure: {chunk}", file=sys.stderr)
-                            continue # Skip to next chunk
-                    except AttributeError as e:
-                        print(f"  - Error accessing chunk attributes: {e}. Chunk: {chunk}", file=sys.stderr)
-                        continue # Skip malformed chunk
-                    except Exception as e: # Catch other potential errors during access
-                        print(f"  - Unexpected error accessing chunk delta: {e}. Chunk: {chunk}", file=sys.stderr)
-                        continue
+                        # --- Safely access delta ---
+                        delta = None
+                        try:
+                            # Ensure chunk is not the error marker before accessing choices/delta
+                            if chunk and not isinstance(chunk, dict) and hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
+                                 # Access delta safely
+                                 if hasattr(chunk.choices[0], 'delta'):
+                                     delta = chunk.choices[0].delta
+                                 else:
+                                     # print(f"  - Skipping chunk choice missing 'delta': {chunk.choices[0]}", file=sys.stderr)
+                                     continue # Skip choice if delta is missing
+                            else:
+                                # Log unexpected chunk structure if needed, but don't stop
+                                # print(f"  - Skipping chunk with unexpected structure: {chunk}", file=sys.stderr)
+                                continue # Skip to next chunk
+                        except AttributeError as e:
+                            print(f"  - Error accessing chunk attributes: {e}. Chunk: {chunk}", file=sys.stderr)
+                            continue # Skip malformed chunk
+                        except Exception as e: # Catch other potential errors during access
+                            print(f"  - Unexpected error accessing chunk delta: {e}. Chunk: {chunk}", file=sys.stderr)
+                            continue
 
-                    if not delta:
-                        # print(f"  - Skipping chunk with no delta: {chunk}", file=sys.stderr)
-                        continue # Skip chunk if delta couldn't be accessed
+                        if not delta:
+                            # print(f"  - Skipping chunk with no delta: {chunk}", file=sys.stderr)
+                            continue # Skip chunk if delta couldn't be accessed
 
-                    # --- Process text content ---
-                    try:
-                        if hasattr(delta, 'content') and delta.content:
-                            content_piece = delta.content
-                            stream_to_main_process(content_piece) # Stream text content
-                            full_response_text += content_piece # Accumulate text
-                    except Exception as e:
-                         print(f"  - Error processing delta.content: {e}. Delta: {delta}", file=sys.stderr)
-                         # Continue processing other parts if possible
+                        # --- Process text content ---
+                        try:
+                            if hasattr(delta, 'content') and delta.content:
+                                content_piece = delta.content
+                                stream_to_main_process(content_piece) # Stream text content
+                                full_response_text += content_piece # Accumulate text
+                        except Exception as e:
+                             print(f"  - Error processing delta.content: {e}. Delta: {delta}", file=sys.stderr)
+                             # Continue processing other parts if possible
 
-                    # --- Process tool calls ---
-                    try:
-                        if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                            for call_chunk in delta.tool_calls:
-                                # --- Safely access tool call chunk attributes ---
-                                index = getattr(call_chunk, 'index', None)
-                                if index is None:
-                                    print(f"  - Skipping tool call chunk missing 'index': {call_chunk}", file=sys.stderr)
-                                    continue
+                        # --- Process tool calls ---
+                        try:
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                for call_chunk in delta.tool_calls:
+                                    # --- Safely access tool call chunk attributes ---
+                                    index = getattr(call_chunk, 'index', None)
+                                    if index is None:
+                                        print(f"  - Skipping tool call chunk missing 'index': {call_chunk}", file=sys.stderr)
+                                        continue
 
-                                # --- Initialize fragment if new ---
-                                if index not in tool_call_fragments:
-                                    tool_id = getattr(call_chunk, 'id', None)
-                                    tool_type = getattr(call_chunk, 'type', 'function') # Default type
-                                    # Safely access function name
-                                    function_obj = getattr(call_chunk, 'function', None)
-                                    func_name = getattr(function_obj, 'name', None) if function_obj else None
+                                    # --- Initialize fragment if new ---
+                                    if index not in tool_call_fragments:
+                                        tool_id = getattr(call_chunk, 'id', None)
+                                        tool_type = getattr(call_chunk, 'type', 'function') # Default type
+                                        # Safely access function name
+                                        function_obj = getattr(call_chunk, 'function', None)
+                                        func_name = getattr(function_obj, 'name', None) if function_obj else None
 
-                                    if tool_id and func_name: # Require id and function name to initialize
-                                        tool_call_fragments[index] = {
-                                            "id": tool_id,
-                                            "type": tool_type,
-                                            "function": {"name": func_name, "arguments": ""}
-                                        }
-                                        print(f"  - Started tool call fragment {index}: id={tool_id}, name={func_name}", file=sys.stderr)
-                                        # --- Send Start of JSON Structure ---
-                                        # Send tool_name explicitly in the message payload, content is now just a marker/empty
-                                        send_message("stream", session_path, role="tool_json",
-                                                     content="", tool_id=tool_id, tool_name=func_name) # Send empty content
-                                    else:
-                                        print(f"  - Skipping incomplete tool call chunk (missing id or func name): {call_chunk}", file=sys.stderr)
-                                        continue # Skip if essential init info is missing
+                                        if tool_id and func_name: # Require id and function name to initialize
+                                            tool_call_fragments[index] = {
+                                                "id": tool_id,
+                                                "type": tool_type,
+                                                "function": {"name": func_name, "arguments": ""}
+                                            }
+                                            print(f"  - Started tool call fragment {index}: id={tool_id}, name={func_name}", file=sys.stderr)
+                                            # --- Send Start of JSON Structure ---
+                                            # Send tool_name explicitly in the message payload, content is now just a marker/empty
+                                            send_message("stream", session_path, role="tool_json",
+                                                         content="", tool_id=tool_id, tool_name=func_name) # Send empty content
+                                        else:
+                                            print(f"  - Skipping incomplete tool call chunk (missing id or func name): {call_chunk}", file=sys.stderr)
+                                            continue # Skip if essential init info is missing
 
-                                # --- Append and Stream Argument Chunks ---
-                                # Check if fragment was successfully initialized before appending args
-                                if index in tool_call_fragments:
-                                    # Safely access arguments
-                                    function_obj = getattr(call_chunk, 'function', None)
-                                    arguments_chunk = getattr(function_obj, 'arguments', None) if function_obj else None
-                                    if arguments_chunk:
-                                        # Append to internal fragment storage (still needed for final parsing/history)
-                                        tool_call_fragments[index]["function"]["arguments"] += arguments_chunk
-                                        # --- Stream Argument Chunk ---
-                                        send_message("stream", session_path, role="tool_json_args", content=arguments_chunk, tool_id=tool_call_fragments[index]["id"])
-                                        # print(f"  - Streamed args chunk for fragment {index}: {arguments_chunk}", file=sys.stderr) # Verbose
-                    except Exception as e:
-                         print(f"  - Error processing delta.tool_calls: {e}. Delta: {delta}", file=sys.stderr)
-                         # Continue processing other parts if possible
+                                    # --- Append and Stream Argument Chunks ---
+                                    # Check if fragment was successfully initialized before appending args
+                                    if index in tool_call_fragments:
+                                        # Safely access arguments
+                                        function_obj = getattr(call_chunk, 'function', None)
+                                        arguments_chunk = getattr(function_obj, 'arguments', None) if function_obj else None
+                                        if arguments_chunk:
+                                            # Append to internal fragment storage (still needed for final parsing/history)
+                                            tool_call_fragments[index]["function"]["arguments"] += arguments_chunk
+                                            # --- Stream Argument Chunk ---
+                                            send_message("stream", session_path, role="tool_json_args", content=arguments_chunk, tool_id=tool_call_fragments[index]["id"])
+                                            # print(f"  - Streamed args chunk for fragment {index}: {arguments_chunk}", file=sys.stderr) # Verbose
+                        except Exception as e:
+                             print(f"  - Error processing delta.tool_calls: {e}. Delta: {delta}", file=sys.stderr)
+                             # Continue processing other parts if possible
 
             except Exception as e:
                 llm_error_occurred = True # Set flag
