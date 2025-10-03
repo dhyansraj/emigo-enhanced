@@ -1,0 +1,128 @@
+#+TITLE: EmigoE Enhancement Roadmap
+#+AUTHOR: dhyansraj
+#+DATE: 2025-10-03
+
+* Overview
+
+EmigoE is a fork of emigo with focus on better UX, cleaner interface, and developer experience.
+
+* Development Setup
+** Hot Reload
+- [X] ~emigo-dev-reload~ function for quick iteration
+- [X] Preserves config on reload
+- [X] Works with local clone at ~~/workspace/github/emigo-enhanced~
+
+* Priority 1: Window Management
+** DONE Flexible window display modes
+- [X] Add ~emigo-use-side-window~ variable (default ~t~)
+- [X] Support both main buffer and side window modes
+- [X] Toggle between modes with ~emigo-toggle-window-mode~ (~C-c w~)
+- [X] Width enforcement only for side-window mode
+- [X] Proper window state management
+- [X] No hacky workarounds
+
+** DONE Smart session switching (Hybrid approach)
+- [X] Auto-switch to correct session when emigo window is visible
+- [X] Manual command ~emigo-switch-to-current-project~ (~C-c s~) for when hidden
+- [X] Use vc-git-root for project detection (existing)
+- [X] Add projectile support as fallback
+- [X] Track multiple concurrent sessions correctly
+- [X] Each session maintains its own file context
+
+** DONE Multi-session support improvements
+- [X] Ensure ~emigo-project-buffers~ tracks all sessions correctly
+- [X] Session-specific header line shows correct project/files
+- [X] Auto-create sessions when switching to new projects
+- [X] Add ~emigo-auto-create-sessions~ variable (default ~t~)
+- [ ] Test with multiple projects open simultaneously
+
+* Priority 2: Magit-style Interface
+** TODO Transient menu for settings
+- [ ] ~C-c e ?~ to show menu
+- [ ] Quick access to common operations
+- [ ] Add/remove files
+- [ ] Clear history
+- [ ] Restart process
+- [ ] Change model/settings
+
+* Priority 3: Streaming & Visual Feedback
+** TODO Handle async/streaming responses
+- [ ] Visual indicator when AI is thinking
+- [ ] Show streaming text in real-time
+- [ ] Clear indication when response is complete
+- [ ] Progress bar for long operations
+
+** TODO Better status display
+- [ ] Show current turn (e.g., "Turn 2/10")
+- [ ] Display token usage (input/output)
+- [ ] Context length indicator
+- [ ] Model being used
+
+* Priority 4: Error Handling
+** TODO Proper error reports (like Claude Code)
+- [ ] Authentication errors
+- [ ] API errors (rate limit, timeout, etc.)
+- [ ] Token limit errors
+- [ ] Network errors
+- [ ] Clear error messages with suggested fixes
+
+* Priority 5: Command Execution
+** TODO Command preview & history
+- [ ] Preview command before execution
+- [ ] Command output in collapsible sections
+- [ ] Re-run last command easily
+- [ ] Command history browser
+
+* Priority 6: File Operations
+** TODO Diff preview & undo
+- [ ] Show diff before applying changes (like magit)
+- [ ] Undo last AI edit
+- [ ] File operation log
+- [ ] Highlight files in context
+
+* Priority 7: Context Management
+** TODO Large file & history handling
+- [ ] Smart context pruning
+- [ ] Context size warnings
+- [ ] Visual indicator of files in context
+- [ ] Easy add/remove without typing paths
+
+* Priority 8: Session Management
+** TODO Save/load sessions
+- [ ] Save conversation to file
+- [ ] Load previous sessions
+- [ ] Multiple concurrent sessions per project
+- [ ] Export to markdown/org
+
+* Priority 9: Keybindings & UX
+** TODO Quick actions
+- [ ] ~C-c e r~ - Retry last request
+- [ ] ~C-c e u~ - Undo last change
+- [ ] ~C-c e c~ - Clear history
+- [ ] ~C-c e +/-/=~ - Adjust window width (DONE)
+
+** TODO Region-based edits
+- [ ] Select text → ~C-c e e~ → AI edits selection
+- [ ] Insert AI response at point
+- [ ] Copy code blocks easily
+
+* Priority 10: Developer Experience
+** TODO Debug & testing
+- [ ] Debug mode showing API calls/responses
+- [ ] Performance metrics
+- [ ] Test mode with mock responses
+- [ ] Per-project system prompts
+
+* Completed Features
+- [X] Hot reload function
+- [X] Auto-approve commands
+- [X] Fixed command output bug
+- [X] Window width adjustment functions
+- [X] Azure token refresh helper
+- [X] Changed prompt to "EmigoE>"
+
+* Notes
+- Keep changes compatible with upstream where possible
+- Focus on UX improvements that make daily use pleasant
+- Document all new features
+- Add tests for critical functionality
