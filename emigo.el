@@ -974,7 +974,11 @@ If the file is visited in a buffer, offer to revert it."
 
 (defun emigo--agent-finished (session-path)
   "Callback function when the agent finishes its interaction for SESSION-PATH."
-  ;; TODO: Maybe update a mode-line indicator?
+  ;; Stop the response indicator
+  (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+    (when buffer
+      (with-current-buffer buffer
+        (emigo-visual-stop-thinking-indicator))))
   (message "[Emigo] Agent finished for session: %s" session-path)
   nil)
 

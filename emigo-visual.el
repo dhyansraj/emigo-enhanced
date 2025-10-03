@@ -261,6 +261,7 @@ MODEL-INFO: string like \"gpt-4\""
 (defun emigo-visual--flush-buffer-advice (orig-fun session-path content &optional role tool-id tool-name)
   "Advice for emigo--flush-buffer to add visual enhancements.
 Intercepts tool calls to apply fancy formatting instead of plain text."
+  (message "[DEBUG ADVICE] Called with role=%s, tool-name=%s, content-length=%d" role tool-name (length content))
   ;; Save tool-name when we get it (in tool_json), use it for subsequent calls
   (when (and (equal role "tool_json") tool-name)
     (setq emigo--current-tool-name tool-name))
@@ -321,9 +322,6 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
           ;; tool_json: Start of tool call - accumulate and show fancy header
    ((equal role "tool_json")
     (setq emigo--tool-json-block content)
-    ;; If this is attempt_completion, stop the response indicator
-    (when (string= effective-tool-name "attempt_completion")
-      (emigo-visual-stop-thinking-indicator))
     ;; Skip attempt_completion - don't show it
     (unless (string= effective-tool-name "attempt_completion")
       (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
