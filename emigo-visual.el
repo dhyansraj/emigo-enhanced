@@ -240,47 +240,80 @@ MODEL-INFO: string like \"gpt-4\""
 (defvar emigo-prompt-symbol)
 (declare-function emigo--execute-command-sync "emigo")
 
+;; Track the current tool name across calls
+(defvar-local emigo--current-tool-name nil
+  "The name of the tool currently being called.")
+
 (defun emigo-visual--flush-buffer-advice (orig-fun session-path content &optional role tool-id tool-name)
   "Advice for emigo--flush-buffer to add visual enhancements.
 Intercepts tool calls to apply fancy formatting instead of plain text."
-  ;; For tool calls, intercept and replace with fancy formatting
-  (if (and (member role '("tool_json" "tool_json_args" "tool_json_end"))
-           (not (string= tool-name "attempt_completion")))
-      ;; Handle tool calls with fancy formatting
-      (cond
-       ((equal role "tool_json")
-        (setq emigo--tool-json-block content)
-        (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
-          (when buffer
-            (with-current-buffer buffer
-              (save-excursion
-                (let ((inhibit-read-only t))
-                  (goto-char (point-max))
-                  (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
-                    (forward-line -2)
-                    (goto-char (line-end-position)))
-                  (insert (emigo-visual--format-tool-call-header (or tool-name "(unknown)")))))))))
+  ;; DEBUG: Log all calls
+  (message "[DEBUG ADVICE] role=%s, tool-name=%s, content-length=%d" role tool-name (length content))
+  
+  ;; Save tool-name when we get it (in tool_json), use it for subsequent calls
+  (when (and (equal role "tool_json") tool-name)
+    (setq emigo--current-tool-name tool-name))
+  
+  ;; Use saved tool-name if current one is nil
+  (let ((effective-tool-name (or tool-name emigo--current-tool-name)))
+    ;; For tool calls, intercept and replace with fancy formatting
+    (if (and (member role '("tool_json" "tool_json_args" "tool_json_end"))
+             (not (string= effective-tool-name "attempt_completion")))
+        ;; Handle tool calls with fancy formatting
+        (cond
+         ((equal role "tool_json")
+          (setq emigo--tool-json-block content)
+          (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+            (when buffer
+              (with-current-buffer buffer
+                (save-excursion
+                  (let ((inhibit-read-only t))
+                    (goto-char (point-max))
+                    (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+                      (forward-line -2)
+                      (goto-char (line-end-position)))
+                    ;; Insert header
+                    (insert (emigo-visual--format-tool-call-header (or effective-tool-name "(unknown)")))
+                    ;; For execute_command, show the command immediately if we can parse it
+                    (when (string= effective-tool-name "execute_command")
+                      (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                      (insert "  ")
+                      (insert (propertize "Executing command..." 'face '(:foreground "cyan" :weight bold)))
+                      (insert "\n")))))))
+          nil)
        
        ((equal role "tool_json_args")
-        (setq emigo--tool-json-block (concat emigo--tool-json-block content)))
+        (setq emigo--tool-json-block (concat emigo--tool-json-block content))
+        nil)
        
        ((equal role "tool_json_end")
-        (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
-          (when buffer
-            (with-current-buffer buffer
-              (save-excursion
-                (let ((inhibit-read-only t))
-                  (goto-char (point-max))
-                  (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
-                    (forward-line -2)
-                    (goto-char (line-end-position)))
-                  (insert (emigo-visual--format-json-args emigo--tool-json-block tool-name))
-                  (insert "\n")
-                  (insert (emigo-visual--format-tool-call-footer))
-                  (setq emigo--tool-json-block ""))))))
-        (setq emigo--tool-json-block "")))
-    ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
-    (funcall orig-fun session-path content role tool-id tool-name)))
+        ;; DEBUG
+        (message "[DEBUG] tool_json_end: effective-tool-name=%s, json=%s" effective-tool-name emigo--tool-json-block)
+        ;; Skip attempt_completion - don't show it
+        (unless (string= effective-tool-name "attempt_completion")
+          (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+            (when buffer
+              (with-current-buffer buffer
+                (save-excursion
+                  (let ((inhibit-read-only t))
+                    (goto-char (point-max))
+                    (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+                      (forward-line -2)
+                      (goto-char (line-end-position)))
+                    ;; Insert formatted JSON args (pass effective-tool-name for execute_command)
+                    (let ((formatted (emigo-visual--format-json-args emigo--tool-json-block effective-tool-name)))
+                      (message "[DEBUG] Formatted output: %s" formatted)
+                      (insert formatted))
+                    (insert "\n")
+                    ;; Insert footer
+                    (insert (emigo-visual--format-tool-call-footer))
+                    (setq emigo--tool-json-block ""))))))
+        ;; Clear the block and tool name even if we skipped display
+        (setq emigo--tool-json-block "")
+        (setq emigo--current-tool-name nil)
+        nil)))
+      ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
+      (funcall orig-fun session-path content role tool-id tool-name))))
 
 (defun emigo-visual--signal-completion-advice (orig-fun session-path result-text command-string)
   "Advice for emigo--signal-completion to style completion text.
