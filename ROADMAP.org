@@ -132,6 +132,18 @@ EmigoE is a fork of emigo with focus on better UX, cleaner interface, and develo
 - [X] Update description to exclude already-executed commands
 - [ ] Test with GPT-4.5 to verify it doesn't repeat verification commands
 
+** DONE Debug tool invocations
+- [X] Add debug logging in emigo-visual.el for all tool calls
+- [X] Log tool name, role, tool-id, and actual content
+- [X] Log complete JSON parameters when tool call ends
+- [X] Create reusable utility function for tool parameter display
+- [X] Add visual displays for all major tools:
+  - execute_command: $ command (cyan)
+  - read_file: 📄 filename (green)
+  - write_to_file: ✏️ filename (blue)
+  - replace_in_file: 🔧 filename (yellow)
+  - search_files: 🔍 pattern (magenta)
+
 * Completed Features
 - [X] Hot reload function
 - [X] Auto-approve commands

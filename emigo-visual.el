@@ -70,6 +70,35 @@ When nil, uses simple text format."
 
 ;;; Tool Call Display
 
+(defun emigo-visual--display-tool-param (session-path tool-name param-key placeholder-text prefix-text param-face)
+  "Display a tool parameter value in the buffer.
+SESSION-PATH: The session path to find the buffer.
+TOOL-NAME: The name of the tool being called.
+PARAM-KEY: The JSON key to extract (e.g., 'command', 'path').
+PLACEHOLDER-TEXT: Text to show initially (e.g., 'Executing command...').
+PREFIX-TEXT: Prefix to show before the value (e.g., '$ ', '📄 ').
+PARAM-FACE: Face properties for the parameter value."
+  (when (and (string-match-p (format "\"%s\"" param-key) emigo--tool-json-block)
+             (string-suffix-p "}" emigo--tool-json-block)) ;; Wait for complete JSON
+    (condition-case nil
+        (let* ((json-data (json-parse-string emigo--tool-json-block :object-type 'alist))
+               (param-value (alist-get (intern param-key) json-data)))
+          (when param-value
+            (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+              (when buffer
+                (with-current-buffer buffer
+                  (save-excursion
+                    (let ((inhibit-read-only t))
+                      (goto-char (point-max))
+                      (when (search-backward placeholder-text nil t)
+                        (beginning-of-line)
+                        (kill-line)
+                        (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                        (insert "  ")
+                        (insert (propertize prefix-text 'face 'emigo-tool-call-border))
+                        (insert (propertize param-value 'face param-face))))))))))
+      (error nil))))
+
 (defun emigo-visual--format-tool-call-header (tool-name)
   "Format a Claude Code-style header for TOOL-NAME."
   (concat
@@ -245,6 +274,14 @@ MODEL-INFO: string like \"gpt-4\""
 (defun emigo-visual--flush-buffer-advice (orig-fun session-path content &optional role tool-id tool-name)
   "Advice for emigo--flush-buffer to add visual enhancements.
 Intercepts tool calls to apply fancy formatting instead of plain text."
+  ;; DEBUG: Log all tool-related calls with actual content
+  (when (member role '("tool_json" "tool_json_args" "tool_json_end"))
+    (message "[Emigo Visual DEBUG] role=%s tool-name=%s tool-id=%s"
+             role
+             (or tool-name "nil")
+             (or tool-id "nil"))
+    (message "[Emigo Visual DEBUG] content: %s" content))
+  
   ;; Save tool-name when we get it (in tool_json), use it for subsequent calls
   (when (and (equal role "tool_json") tool-name)
     (setq emigo--current-tool-name tool-name))
@@ -269,43 +306,81 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
                       (goto-char (line-end-position)))
                     ;; Insert header
                     (insert (emigo-visual--format-tool-call-header (or effective-tool-name "(unknown)")))
-                    ;; For execute_command, show the command immediately if we can parse it
+                    ;; For execute_command, show placeholder
                     (when (string= effective-tool-name "execute_command")
                       (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
                       (insert "  ")
                       (insert (propertize "Executing command..." 'face '(:foreground "cyan" :weight bold)))
+                      (insert "\n"))
+                    ;; For read_file, show placeholder
+                    (when (string= effective-tool-name "read_file")
+                      (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                      (insert "  ")
+                      (insert (propertize "Reading file..." 'face '(:foreground "green" :weight bold)))
+                      (insert "\n"))
+                    ;; For write_to_file, show placeholder
+                    (when (string= effective-tool-name "write_to_file")
+                      (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                      (insert "  ")
+                      (insert (propertize "Writing file..." 'face '(:foreground "blue" :weight bold)))
+                      (insert "\n"))
+                    ;; For replace_in_file, show placeholder
+                    (when (string= effective-tool-name "replace_in_file")
+                      (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                      (insert "  ")
+                      (insert (propertize "Editing file..." 'face '(:foreground "yellow" :weight bold)))
+                      (insert "\n"))
+                    ;; For search_files, show placeholder
+                    (when (string= effective-tool-name "search_files")
+                      (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                      (insert "  ")
+                      (insert (propertize "Searching..." 'face '(:foreground "magenta" :weight bold)))
                       (insert "\n")))))))
           nil)
        
        ((equal role "tool_json_args")
         (setq emigo--tool-json-block (concat emigo--tool-json-block content))
-        ;; Try to parse and display command if we have enough JSON
-        (when (and (string= effective-tool-name "execute_command")
-                   (string-match-p "\"command\"" emigo--tool-json-block)
-                   (string-suffix-p "}" emigo--tool-json-block)) ;; Wait for complete JSON
-          (condition-case nil
-              (let* ((json-data (json-parse-string emigo--tool-json-block :object-type 'alist))
-                     (command (alist-get 'command json-data)))
-                (when command
-                  ;; Insert the command into the buffer
-                  (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
-                    (when buffer
-                      (with-current-buffer buffer
-                        (save-excursion
-                          (let ((inhibit-read-only t))
-                            ;; Find the "Executing command..." line and replace it
-                            (goto-char (point-max))
-                            (when (search-backward "Executing command..." nil t)
-                              (beginning-of-line)
-                              (kill-line)
-                              (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
-                              (insert "  ")
-                              (insert (propertize "$ " 'face 'emigo-tool-call-border))
-                              (insert (propertize command 'face '(:foreground "cyan" :weight bold)))))))))))
-            (error nil)))
+        
+        ;; Display parameters for different tools using the utility function
+        (cond
+         ((string= effective-tool-name "execute_command")
+          (emigo-visual--display-tool-param 
+           session-path effective-tool-name "command" 
+           "Executing command..." "$ " 
+           '(:foreground "cyan" :weight bold)))
+         
+         ((string= effective-tool-name "read_file")
+          (emigo-visual--display-tool-param 
+           session-path effective-tool-name "path" 
+           "Reading file..." "📄 " 
+           '(:foreground "green" :weight bold)))
+         
+         ((string= effective-tool-name "write_to_file")
+          (emigo-visual--display-tool-param 
+           session-path effective-tool-name "path" 
+           "Writing file..." "✏️ " 
+           '(:foreground "blue" :weight bold)))
+         
+         ((string= effective-tool-name "replace_in_file")
+          (emigo-visual--display-tool-param 
+           session-path effective-tool-name "path" 
+           "Editing file..." "🔧 " 
+           '(:foreground "yellow" :weight bold)))
+         
+         ((string= effective-tool-name "search_files")
+          (emigo-visual--display-tool-param 
+           session-path effective-tool-name "pattern" 
+           "Searching..." "🔍 " 
+           '(:foreground "magenta" :weight bold))))
         nil)
        
        ((equal role "tool_json_end")
+        ;; DEBUG: Log complete tool call with accumulated JSON parameters
+        (message "[Emigo Visual DEBUG] ========================================")
+        (message "[Emigo Visual DEBUG] Tool call complete: %s" effective-tool-name)
+        (message "[Emigo Visual DEBUG] Full JSON: %s" emigo--tool-json-block)
+        (message "[Emigo Visual DEBUG] ========================================")
+        
         ;; Skip attempt_completion - don't show it
         (unless (string= effective-tool-name "attempt_completion")
           (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
