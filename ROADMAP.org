@@ -137,12 +137,14 @@ EmigoE is a fork of emigo with focus on better UX, cleaner interface, and develo
 - [X] Log tool name, role, tool-id, and actual content
 - [X] Log complete JSON parameters when tool call ends
 - [X] Create reusable utility function for tool parameter display
-- [X] Add visual displays for all major tools:
+- [X] Add visual displays for ALL tools:
   - execute_command: $ command (cyan)
   - read_file: 📄 filename (green)
   - write_to_file: ✏️ filename (blue)
   - replace_in_file: 🔧 filename (yellow)
   - search_files: 🔍 pattern (magenta)
+  - list_repomap: 🗺️ path (orange)
+  - list_files: 📁 path (purple)
 
 * Completed Features
 - [X] Hot reload function

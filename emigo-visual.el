@@ -335,6 +335,18 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
                       (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
                       (insert "  ")
                       (insert (propertize "Searching..." 'face '(:foreground "magenta" :weight bold)))
+                      (insert "\n"))
+                    ;; For list_repomap, show placeholder
+                    (when (string= effective-tool-name "list_repomap")
+                      (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                      (insert "  ")
+                      (insert (propertize "Analyzing codebase..." 'face '(:foreground "orange" :weight bold)))
+                      (insert "\n"))
+                    ;; For list_files, show placeholder
+                    (when (string= effective-tool-name "list_files")
+                      (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                      (insert "  ")
+                      (insert (propertize "Listing directory..." 'face '(:foreground "purple" :weight bold)))
                       (insert "\n")))))))
           nil)
        
@@ -371,7 +383,19 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
           (emigo-visual--display-tool-param 
            session-path effective-tool-name "pattern" 
            "Searching..." "🔍 " 
-           '(:foreground "magenta" :weight bold))))
+           '(:foreground "magenta" :weight bold)))
+         
+         ((string= effective-tool-name "list_repomap")
+          (emigo-visual--display-tool-param 
+           session-path effective-tool-name "path" 
+           "Analyzing codebase..." "🗺️ " 
+           '(:foreground "orange" :weight bold)))
+         
+         ((string= effective-tool-name "list_files")
+          (emigo-visual--display-tool-param 
+           session-path effective-tool-name "path" 
+           "Listing directory..." "📁 " 
+           '(:foreground "purple" :weight bold))))
         nil)
        
        ((equal role "tool_json_end")
