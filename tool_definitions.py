@@ -22,7 +22,6 @@ from tools import (
     search_files,
     list_files,
     list_repomap,
-    ask_followup_question,
     attempt_completion
 )
 
@@ -35,7 +34,6 @@ TOOL_REPLACE_IN_FILE = "replace_in_file"
 TOOL_SEARCH_FILES = "search_files"
 TOOL_LIST_FILES = "list_files"
 TOOL_LIST_REPOMAP = "list_repomap"
-TOOL_ASK_FOLLOWUP_QUESTION = "ask_followup_question"
 TOOL_ATTEMPT_COMPLETION = "attempt_completion"
 
 
@@ -156,22 +154,12 @@ LIST_REPOMAP_TOOL = ToolDefinition(
     function=list_repomap
 )
 
-ASK_FOLLOWUP_QUESTION_TOOL = ToolDefinition(
-    name="ask_followup_question",
-    description="Ask the user a question to gather additional information needed to complete the task. This tool should be used when you encounter ambiguities, need clarification, or require more details to proceed effectively. It allows for interactive problem-solving by enabling direct communication with the user. Use this tool judiciously to maintain a balance between gathering necessary information and avoiding excessive back-and-forth.",
-    parameters=[
-        ToolParameter(name="question", type="string", description="The question to ask the user.", required=True),
-        ToolParameter(name="options", type="array", description="Optional array of 2-5 string options for the user to choose from.", required=False),
-    ],
-    function=ask_followup_question
-)
-
 ATTEMPT_COMPLETION_TOOL = ToolDefinition(
     name="attempt_completion",
-    description="Use this tool ONLY when you have successfully completed all steps required by the user's request. After using a tool like `replace_in_file` or `write_to_file`, analyze the result: if the change successfully fulfills the user's request, use this tool to present the final result. Do not attempt further refinements unless explicitly asked. Optionally, provide a CLI command to demonstrate the result. The user may provide feedback if unsatisfied, which you can use to make improvements and try again.",
+    description="Use this tool ONLY when you have successfully completed all steps required by the user's request. After using a tool like `replace_in_file` or `write_to_file`, analyze the result: if the change successfully fulfills the user's request, use this tool to present the final result. Do not attempt further refinements unless explicitly asked. Optionally, provide a CLI command to showcase the completed work (e.g., 'open index.html' for a website, 'python app.py' to run a new script). Do NOT include verification commands that were already executed (like '--version' checks). The user may provide feedback if unsatisfied, which you can use to make improvements and try again.",
     parameters=[
         ToolParameter(name="result", type="string", description="The final result description.", required=True),
-        ToolParameter(name="command", type="string", description="Optional CLI command to demonstrate the result.", required=False),
+        ToolParameter(name="command", type="string", description="Optional CLI command to showcase/demo the completed work. Use this for commands that run or display what you built (e.g., 'open index.html', 'python app.py', 'npm start'). Do NOT use this for verification commands that were already executed.", required=False),
     ],
     function=attempt_completion
 )
@@ -187,7 +175,6 @@ TOOL_REGISTRY: Dict[str, ToolDefinition] = {
         SEARCH_FILES_TOOL,
         LIST_FILES_TOOL,
         LIST_REPOMAP_TOOL,
-        ASK_FOLLOWUP_QUESTION_TOOL,
         ATTEMPT_COMPLETION_TOOL,
     ]
 }

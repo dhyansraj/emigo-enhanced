@@ -120,6 +120,18 @@ EmigoE is a fork of emigo with focus on better UX, cleaner interface, and develo
 - [ ] Test mode with mock responses
 - [ ] Per-project system prompts
 
+* Priority 11: Natural Conversation Flow
+** IN-PROGRESS Remove ask_followup_question tool
+- [X] Remove tool from tool_definitions.py
+- [X] Update system prompt to allow natural questions
+- [X] Keep Emacs-side handler (may be useful for future features)
+- [ ] Test with GPT-4.5 to verify natural question flow
+
+** DONE Fix attempt_completion command parameter
+- [X] Clarify that command is for showcasing NEW work, not verification
+- [X] Update description to exclude already-executed commands
+- [ ] Test with GPT-4.5 to verify it doesn't repeat verification commands
+
 * Completed Features
 - [X] Hot reload function
 - [X] Auto-approve commands
