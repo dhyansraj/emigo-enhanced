@@ -120,7 +120,16 @@ EmigoE is a fork of emigo with focus on better UX, cleaner interface, and develo
 - [ ] Test mode with mock responses
 - [ ] Per-project system prompts
 
-* Priority 11: Natural Conversation Flow
+* Priority 11: Performance Optimization
+** DONE Fix critical performance issue in emigo--flush-buffer
+- [X] Cache prompt position with emigo--prompt-marker (avoid O(n) searches)
+- [X] Remove redundant second buffer search (lines 695-698)
+- [X] Replace emigo-lock-region with efficient emigo--update-readonly-region
+- [X] Reuse single overlay instead of creating new ones per character
+- [X] Update prompt marker on buffer creation and clear
+- [X] Result: O(1) per character instead of O(n), massive speedup
+
+* Priority 12: Natural Conversation Flow
 ** IN-PROGRESS Remove ask_followup_question tool
 - [X] Remove tool from tool_definitions.py
 - [X] Update system prompt to allow natural questions

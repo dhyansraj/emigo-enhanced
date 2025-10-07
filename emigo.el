@@ -175,6 +175,14 @@ Searches parent directories for existing sessions."
 (defvar-local emigo--llm-output "" ;; Buffer-local LLM output accumulator
   "Accumulates the LLM output stream for the current interaction.")
 
+(defvar-local emigo--prompt-marker nil
+  "Marker pointing to the start of the current prompt line.
+Cached to avoid expensive buffer searches on every character insert.")
+
+(defvar-local emigo--readonly-overlay nil
+  "Overlay for the read-only region before the prompt.
+Reused instead of creating new overlays on every insert.")
+
 (defvar emigo--tool-json-block ""
   "Tracks current fragments of a tool call JSON being inserted.")
 
@@ -416,8 +424,10 @@ as the session path."
       ;; Switch to or display the buffer
       (emigo-create-window buffer) ;; Use the specific buffer
 
-      ;; Insert prompt.
-      (insert (propertize (concat "\n\n" emigo-prompt-symbol) 'face font-lock-keyword-face)))))
+      ;; Insert prompt and set marker
+      (let ((prompt-start (point)))
+        (insert (propertize (concat "\n\n" emigo-prompt-symbol) 'face font-lock-keyword-face))
+        (setq-local emigo--prompt-marker (copy-marker prompt-start t))))))
 
 ;; --- Window Variables (defined in emigo-window.el) ---
 ;; Forward declarations for variables defined in emigo-window.el
@@ -636,6 +646,71 @@ If on a prompt line:
       (emigo-visual-start-thinking-indicator)
       (emigo-call-async "emigo_send" emigo-session-path prompt))))
 
+(defun emigo--find-prompt-position ()
+  "Find and cache the prompt position for better performance."
+  (or emigo--prompt-marker
+      (save-excursion
+        (goto-char (point-max))
+        (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+          (setq emigo--prompt-marker (point-marker))))))
+
+(defun emigo--flush-buffer-optimized (session-path content &optional role tool-id tool-name)
+  "Optimized version of flush-buffer with reduced buffer scanning."
+  (let ((buffer (get-buffer (emigo-get-buffer-name t session-path))))
+    (unless buffer
+      (warn "[Emigo] Could not find buffer for session %s" session-path)
+      (cl-return-from emigo--flush-buffer-optimized))
+    
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)
+            (insert-pos (or emigo--prompt-marker
+                           (save-excursion
+                             (goto-char (point-max))
+                             (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+                               (forward-line -2)
+                               (line-end-position))))))
+        (when insert-pos
+          (save-excursion
+            (goto-char insert-pos)
+            
+            ;; Insert content based on role
+            (cond
+             ((equal role "user")
+              (insert (propertize content 'face font-lock-keyword-face)))
+             
+             ((equal role "tool_json")
+              (let ((display-name (or tool-name "(unknown tool)")))
+                (insert (propertize (format "\n--- Tool Call: %s ---\n" display-name) 'face 'font-lock-comment-face))
+                (insert emigo--tool-json-block)))
+             
+             ((equal role "tool_json_args")
+              (setq emigo--tool-json-block (concat emigo--tool-json-block content))
+              (insert content)
+              (when (string-suffix-p "\\n" emigo--tool-json-block)
+                (insert "\n")))
+             
+             ((equal role "tool_json_end")
+              (unless (looking-back "\\n" 1) (insert "\n"))
+              (insert (propertize "\n--- End Tool Call ---\n" 'face 'font-lock-comment-face))
+              (setq emigo--tool-json-block ""))
+             
+             ((equal role "llm")
+              (unless (string-empty-p emigo--tool-json-block)
+                (setq emigo--tool-json-block ""))
+              (setq-local emigo--llm-output (concat emigo--llm-output content))
+              (insert content))
+             
+             ((equal role "error")
+              (insert "\n")
+              (insert (propertize "⚠ Error: " 'face '(:foreground "red" :weight bold)))
+              (insert (propertize content 'face '(:foreground "red")))
+              (insert "\n"))
+             
+             (t (insert content)))
+            
+            ;; Update cached position
+            (setq emigo--prompt-marker nil)))))))
+
 (defun emigo--flush-buffer (session-path content &optional role tool-id tool-name)
   "Flush CONTENT to the Emigo buffer associated with SESSION-PATH.
 ROLE indicates the type of content (e.g., 'user', 'llm', 'tool_json', 'tool_json_args').
@@ -697,8 +772,30 @@ TOOL-NAME is provided explicitly when ROLE is 'tool_json'."
             (forward-char (1- (length emigo-prompt-symbol)))
             (emigo-lock-region (point-min) (point))))))))
 
+(defun emigo--update-readonly-region ()
+  "Update the read-only region efficiently using a single reused overlay."
+  (when (and emigo--prompt-marker (marker-position emigo--prompt-marker))
+    (let ((readonly-end (save-excursion
+                          (goto-char emigo--prompt-marker)
+                          (forward-char (1- (length emigo-prompt-symbol)))
+                          (point))))
+      ;; Reuse existing overlay or create new one
+      (if (and emigo--readonly-overlay (overlay-buffer emigo--readonly-overlay))
+          ;; Move existing overlay
+          (move-overlay emigo--readonly-overlay (point-min) readonly-end)
+        ;; Create new overlay
+        (setq emigo--readonly-overlay (make-overlay (point-min) readonly-end))
+        (overlay-put emigo--readonly-overlay 'face nil)
+        (overlay-put emigo--readonly-overlay 'modification-hooks 
+                     (list (lambda (&rest _args) (error "This region is read-only"))))
+        (overlay-put emigo--readonly-overlay 'front-sticky t)
+        (overlay-put emigo--readonly-overlay 'rear-nonsticky nil))
+      ;; Set text property for additional protection
+      (put-text-property (point-min) readonly-end 'read-only t))))
+
 (defun emigo-lock-region (beg end)
-  "Super-lock the region from BEG to END."
+  "Super-lock the region from BEG to END.
+DEPRECATED: Use emigo--update-readonly-region instead for better performance."
   (interactive "r")
   (put-text-property beg end 'read-only t)
   (let ((overlay (make-overlay beg end)))
@@ -1071,9 +1168,18 @@ Preserves the prompt history for convenience."
           (setq-local emigo--llm-output "")
           ;; History is managed on the Python side, no local history to clear
           ;; Erase buffer content and reset prompt
-          (let ((inhibit-read-only t))
+          (let ((inhibit-read-only t)
+                (prompt-start (point-min)))
             (erase-buffer)
+            (goto-char (point-min))
+            (setq prompt-start (point))
             (insert (propertize (concat "\n\n" emigo-prompt-symbol) 'face font-lock-keyword-face))
+            ;; Update prompt marker
+            (setq-local emigo--prompt-marker (copy-marker prompt-start t))
+            ;; Clear readonly overlay
+            (when emigo--readonly-overlay
+              (delete-overlay emigo--readonly-overlay)
+              (setq emigo--readonly-overlay nil))
             (goto-char (point-max)))
           ;; Restore the prompt history after clearing
           (setq-local emigo--prompt-history saved-prompt-history)
@@ -1261,6 +1367,9 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
 
 ;; Visual enhancements - applies advice to flush-buffer and signal-completion
 (require 'emigo-visual)
+
+;; Override the original function with optimized version
+(advice-add 'emigo--flush-buffer :override #'emigo--flush-buffer-optimized)
 
 (provide 'emigo)
 ;;; emigo.el ends here
