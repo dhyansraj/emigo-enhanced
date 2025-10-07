@@ -136,10 +136,13 @@ EmigoE is a fork of emigo with focus on better UX, cleaner interface, and develo
 - [X] Keep Emacs-side handler (may be useful for future features)
 - [ ] Test with GPT-4.5 to verify natural question flow
 
-** DONE Fix attempt_completion command parameter
-- [X] Clarify that command is for showcasing NEW work, not verification
-- [X] Update description to exclude already-executed commands
-- [ ] Test with GPT-4.5 to verify it doesn't repeat verification commands
+** DONE Remove attempt_completion command parameter
+- [X] Remove command parameter from tool definition (Python)
+- [X] Update description to mention commands in result text instead
+- [X] Update Python function to not send command
+- [X] Update Emacs function to not expect command
+- [X] Update visual enhancement to match new signature
+- [X] Result: No more demo command prompts, LLM includes commands in text
 
 ** DONE Debug tool invocations
 - [X] Add debug logging in emigo-visual.el for all tool calls

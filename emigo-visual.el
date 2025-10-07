@@ -430,7 +430,7 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
       ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
       (funcall orig-fun session-path content role tool-id tool-name))))
 
-(defun emigo-visual--signal-completion-advice (orig-fun session-path result-text command-string)
+(defun emigo-visual--signal-completion-advice (orig-fun session-path result-text)
   "Advice for emigo--signal-completion to style completion text.
 Makes completion text bright white and bold without box decorations."
   (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
@@ -449,11 +449,8 @@ Makes completion text bright white and bold without box decorations."
             (insert "\n")
             (insert (propertize result-text 'face '(:foreground "white" :weight bold)))
             (insert "\n")))))
-    ;; Still call original to handle message and command prompt
-    (message "[Emigo] Task completed by agent for session: %s" session-path)
-    (when (and command-string (not (string-empty-p command-string)))
-      (if (y-or-n-p (format "Run demonstration command? `%s`" command-string))
-          (emigo--execute-command-sync session-path command-string)))))
+    ;; Call original to handle message
+    (message "[Emigo] Task completed by agent for session: %s" session-path)))
 
 ;; Function to apply/reapply advice
 (defun emigo-visual--apply-advice ()

@@ -156,10 +156,9 @@ LIST_REPOMAP_TOOL = ToolDefinition(
 
 ATTEMPT_COMPLETION_TOOL = ToolDefinition(
     name="attempt_completion",
-    description="Use this tool ONLY when you have successfully completed all steps required by the user's request. After using a tool like `replace_in_file` or `write_to_file`, analyze the result: if the change successfully fulfills the user's request, use this tool to present the final result. Do not attempt further refinements unless explicitly asked. Optionally, provide a CLI command to showcase the completed work (e.g., 'open index.html' for a website, 'python app.py' to run a new script). Do NOT include verification commands that were already executed (like '--version' checks). The user may provide feedback if unsatisfied, which you can use to make improvements and try again.",
+    description="Use this tool ONLY when you have successfully completed all steps required by the user's request. After using a tool like `replace_in_file` or `write_to_file`, analyze the result: if the change successfully fulfills the user's request, use this tool to present the final result. Do not attempt further refinements unless explicitly asked. If there are commands the user should run to see or use the result (e.g., 'open index.html', 'python app.py', 'npm start'), mention them in your result text. The user may provide feedback if unsatisfied, which you can use to make improvements and try again.",
     parameters=[
-        ToolParameter(name="result", type="string", description="The final result description.", required=True),
-        ToolParameter(name="command", type="string", description="Optional CLI command to showcase/demo the completed work. Use this for commands that run or display what you built (e.g., 'open index.html', 'python app.py', 'npm start'). Do NOT use this for verification commands that were already executed.", required=False),
+        ToolParameter(name="result", type="string", description="The final result description. If there are relevant commands for the user to run, include them in this text.", required=True),
     ],
     function=attempt_completion
 )

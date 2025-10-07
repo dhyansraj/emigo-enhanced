@@ -962,9 +962,9 @@ Returns the user's input string, or nil if cancelled/empty."
             (read-string prompt))))
     (if (string-empty-p answer) nil answer)))
 
-(defun emigo--signal-completion (session-path result-text command-string)
+(defun emigo--signal-completion (session-path result-text)
   "Signal that the agent has attempted completion for SESSION-PATH.
-Display RESULT-TEXT and optionally offer to run COMMAND-STRING."
+Display RESULT-TEXT."
   (let ((buffer (get-buffer (emigo-get-buffer-name t session-path))))
     (when buffer
       (with-current-buffer buffer
@@ -983,10 +983,7 @@ Display RESULT-TEXT and optionally offer to run COMMAND-STRING."
             (insert (propertize "\n--- Completion Attempt ---\n" 'face 'font-lock-comment-face))
             (insert result-text)
             (insert (propertize "\n--- End Completion ---\n" 'face 'font-lock-comment-face)))))
-      (message "[Emigo] Task completed by agent for session: %s" session-path)
-      (when (and command-string (not (string-empty-p command-string)))
-        (if (y-or-n-p (format "Run demonstration command? `%s`" command-string))
-            (emigo--execute-command-sync session-path command-string))))))
+      (message "[Emigo] Task completed by agent for session: %s" session-path))))
 
 (defun emigo--replace-regions-sync (abs-path replacements-json-string)
   "Replace multiple regions in ABS-PATH based on data in REPLACEMENTS-JSON-STRING.

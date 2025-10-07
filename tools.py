@@ -410,14 +410,13 @@ def ask_followup_question(session: Session, parameters: Dict[str, Any]) -> str:
 def attempt_completion(session: Session, parameters: Dict[str, Any]) -> str:
     """Signals completion to Emacs."""
     result_text = parameters.get("result")
-    command = parameters.get("command") # Optional command to demonstrate
 
     if result_text is None: # Check if result is missing
         return _format_tool_error("Missing required parameter 'result'")
 
     try:
-        # Signal completion to Emacs (asynchronous is fine here)
-        eval_in_emacs("emigo--signal-completion", session.session_path, result_text, command or "")
+        # Signal completion to Emacs (no command parameter)
+        eval_in_emacs("emigo--signal-completion", session.session_path, result_text)
         # This tool use itself doesn't return content to the LLM, it ends the loop.
         # Return a special marker that the main process/worker can check.
         return "COMPLETION_SIGNALLED"
