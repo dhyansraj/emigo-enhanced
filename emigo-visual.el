@@ -434,9 +434,9 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
           ;; Clear the block and tool name even if we skipped display
           (setq emigo--tool-json-block "")
           (setq emigo--current-tool-name nil)
-          nil)
+          nil))
         ;; For all other roles (user, llm, etc.), call original
-        (funcall orig-fun session-path content role tool-id tool-name)))))
+        (funcall orig-fun session-path content role tool-id tool-name))))))
 
 (defun emigo-visual--signal-completion-advice (orig-fun session-path result-text)
   "Advice for emigo--signal-completion to style completion text.
