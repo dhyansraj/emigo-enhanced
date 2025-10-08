@@ -1362,11 +1362,12 @@ Returns a list suitable for sending back to Python: '((:role \"user\" :content \
 ;; Transient menu interface
 (require 'emigo-transient)
 
+;; Override the original function with optimized version BEFORE loading visual
+;; This ensures visual advice wraps the optimized version
+(advice-add 'emigo--flush-buffer :override #'emigo--flush-buffer-optimized)
+
 ;; Visual enhancements - applies advice to flush-buffer and signal-completion
 (require 'emigo-visual)
-
-;; Override the original function with optimized version
-(advice-add 'emigo--flush-buffer :override #'emigo--flush-buffer-optimized)
 
 (provide 'emigo)
 ;;; emigo.el ends here
