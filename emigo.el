@@ -186,6 +186,9 @@ Reused instead of creating new overlays on every insert.")
 (defvar emigo--tool-json-block ""
   "Tracks current fragments of a tool call JSON being inserted.")
 
+(defvar-local emigo--current-tool-name nil
+  "Tracks the current tool name for suppression logic.")
+
 (defvar-local emigo-chat-file-info nil
   "String displaying info about files in chat context (e.g., '3 files [1234 tokens]').")
 
@@ -736,6 +739,8 @@ TOOL-NAME is provided explicitly when ROLE is 'tool_json'."
             (insert (propertize content 'face font-lock-keyword-face)))
 
            ((equal role "tool_json") ;; Start of a new tool call block
+            ;; Track tool name for subsequent calls
+            (setq emigo--current-tool-name tool-name)
             ;; Skip attempt_completion - it's handled by signal-completion
             (unless (string= tool-name "attempt_completion")
               (let ((display-name (or tool-name "(unknown tool)")))
@@ -745,17 +750,18 @@ TOOL-NAME is provided explicitly when ROLE is 'tool_json'."
            ((equal role "tool_json_args") ;; Middle part (arguments)
             (setq emigo--tool-json-block (concat emigo--tool-json-block content))
             ;; Don't insert args for attempt_completion (suppressed entirely)
-            (unless (string-match-p "\"result\"" emigo--tool-json-block)
+            (unless (string= emigo--current-tool-name "attempt_completion")
               (insert content)
               (when (string-suffix-p "\\n" emigo--tool-json-block)
                 (insert "\n"))))
 
            ((equal role "tool_json_end") ;; Explicit end marker from Python
             ;; Skip attempt_completion end marker
-            (unless (string= tool-name "attempt_completion")
+            (unless (string= emigo--current-tool-name "attempt_completion")
               (unless (looking-back "\\n" 1) (insert "\n")) ;; Ensure newline before end marker
               (insert (propertize "\n--- End Tool Call ---\n" 'face 'font-lock-comment-face)))
-            (setq emigo--tool-json-block ""))
+            (setq emigo--tool-json-block "")
+            (setq emigo--current-tool-name nil))
 
            ((equal role "llm")
             (unless (string-empty-p emigo--tool-json-block)
