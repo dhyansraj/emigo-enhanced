@@ -736,19 +736,25 @@ TOOL-NAME is provided explicitly when ROLE is 'tool_json'."
             (insert (propertize content 'face font-lock-keyword-face)))
 
            ((equal role "tool_json") ;; Start of a new tool call block
-            (let ((display-name (or tool-name "(unknown tool)")))
-              (insert (propertize (format "\n--- Tool Call: %s ---\n" display-name) 'face 'font-lock-comment-face))
-              (insert emigo--tool-json-block)))
+            ;; Skip attempt_completion - it's handled by signal-completion
+            (unless (string= tool-name "attempt_completion")
+              (let ((display-name (or tool-name "(unknown tool)")))
+                (insert (propertize (format "\n--- Tool Call: %s ---\n" display-name) 'face 'font-lock-comment-face))
+                (insert emigo--tool-json-block))))
 
            ((equal role "tool_json_args") ;; Middle part (arguments)
             (setq emigo--tool-json-block (concat emigo--tool-json-block content))
-            (insert content)
-            (when (string-suffix-p "\\n" emigo--tool-json-block)
-              (insert "\n")))
+            ;; Don't insert args for attempt_completion (suppressed entirely)
+            (unless (string-match-p "\"result\"" emigo--tool-json-block)
+              (insert content)
+              (when (string-suffix-p "\\n" emigo--tool-json-block)
+                (insert "\n"))))
 
            ((equal role "tool_json_end") ;; Explicit end marker from Python
-            (unless (looking-back "\\n" 1) (insert "\n")) ;; Ensure newline before end marker
-            (insert (propertize "\n--- End Tool Call ---\n" 'face 'font-lock-comment-face))
+            ;; Skip attempt_completion end marker
+            (unless (string= tool-name "attempt_completion")
+              (unless (looking-back "\\n" 1) (insert "\n")) ;; Ensure newline before end marker
+              (insert (propertize "\n--- End Tool Call ---\n" 'face 'font-lock-comment-face)))
             (setq emigo--tool-json-block ""))
 
            ((equal role "llm")

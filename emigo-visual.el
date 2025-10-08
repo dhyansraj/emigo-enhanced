@@ -288,19 +288,11 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
   
   ;; Use saved tool-name if current one is nil
   (let ((effective-tool-name (or tool-name emigo--current-tool-name)))
-    ;; Skip attempt_completion entirely - don't display it at all
+    ;; For tool calls, intercept and replace with fancy formatting
     (if (and (member role '("tool_json" "tool_json_args" "tool_json_end"))
-             (string= effective-tool-name "attempt_completion"))
-        ;; Suppress attempt_completion display completely
-        (progn
-          (when (equal role "tool_json_end")
-            (setq emigo--tool-json-block "")
-            (setq emigo--current-tool-name nil))
-          nil) ; Return nil to suppress
-      ;; For other tool calls, intercept and replace with fancy formatting
-      (if (member role '("tool_json" "tool_json_args" "tool_json_end"))
-          ;; Handle tool calls with fancy formatting
-          (cond
+             (not (string= effective-tool-name "attempt_completion")))
+        ;; Handle tool calls with fancy formatting
+        (cond
          ((equal role "tool_json")
           (setq emigo--tool-json-block content)
           (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
@@ -431,14 +423,14 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
                     ;; Insert footer
                     (insert (emigo-visual--format-tool-call-footer))
                     (setq emigo--tool-json-block ""))))))
-          ;; Clear the block and tool name even if we skipped display
-          (setq emigo--tool-json-block "")
-          (setq emigo--current-tool-name nil)
-          nil))
-        ;; For all other roles (user, llm, etc.), call original
-        (funcall orig-fun session-path content role tool-id tool-name))))))
+        ;; Clear the block and tool name even if we skipped display
+        (setq emigo--tool-json-block "")
+        (setq emigo--current-tool-name nil)
+        nil)))
+      ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
+      (funcall orig-fun session-path content role tool-id tool-name))))
 
-(defun emigo-visual--signal-completion-advice (orig-fun session-path result-text)
+(defun emigo-visual--signal-completion-advice (orig-fun session-path result-text command-string)
   "Advice for emigo--signal-completion to style completion text.
 Makes completion text bright white and bold without box decorations."
   (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
@@ -457,8 +449,11 @@ Makes completion text bright white and bold without box decorations."
             (insert "\n")
             (insert (propertize result-text 'face '(:foreground "white" :weight bold)))
             (insert "\n")))))
-    ;; Call original to handle message
-    (message "[Emigo] Task completed by agent for session: %s" session-path)))
+    ;; Still call original to handle message and command prompt
+    (message "[Emigo] Task completed by agent for session: %s" session-path)
+    (when (and command-string (not (string-empty-p command-string)))
+      (if (y-or-n-p (format "Run demonstration command? `%s`" command-string))
+          (emigo--execute-command-sync session-path command-string)))))
 
 ;; Function to apply/reapply advice
 (defun emigo-visual--apply-advice ()
