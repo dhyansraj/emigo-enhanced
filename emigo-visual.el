@@ -405,6 +405,32 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
         (message "[Emigo Visual DEBUG] Full JSON: %s" emigo--tool-json-block)
         (message "[Emigo Visual DEBUG] ========================================")
         
+        ;; If we have accumulated attempt_completion JSON, parse and display it
+        (when (and emigo--current-tool-name
+                   (string= emigo--current-tool-name "attempt_completion")
+                   (not (string-empty-p emigo--tool-json-block)))
+          (message "[Emigo Visual DEBUG] Processing accumulated attempt_completion JSON")
+          (condition-case err
+              (let* ((json-data (json-parse-string emigo--tool-json-block :object-type 'alist))
+                     (result-from-json (alist-get 'result json-data)))
+                (message "[Emigo Visual DEBUG] Parsed result from JSON: %s" result-from-json)
+                (when result-from-json
+                  (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+                    (when buffer
+                      (with-current-buffer buffer
+                        (let ((inhibit-read-only t))
+                          (goto-char (point-max))
+                          (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+                            (forward-line -2)
+                            (goto-char (line-end-position)))
+                          (message "[Emigo Visual DEBUG] Inserting result at position: %d" (point))
+                          (insert "\n")
+                          (insert (propertize result-from-json 'face '(:foreground "white" :weight bold)))
+                          (insert "\n")
+                          (message "[Emigo Visual DEBUG] Result inserted successfully!")))))))
+            (error
+             (message "[Emigo Visual DEBUG] ERROR parsing attempt_completion: %s" err))))
+        
         ;; Skip attempt_completion - don't show it
         (unless (string= effective-tool-name "attempt_completion")
           (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
@@ -427,10 +453,17 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
         (setq emigo--tool-json-block "")
         (setq emigo--current-tool-name nil)
         nil)))
-      ;; For all other roles (user, llm, etc.) OR attempt_completion, call original
+      ;; For all other roles (user, llm, etc.), call original
       (funcall orig-fun session-path content role tool-id tool-name))))
 
-(defun emigo-visual--signal-completion-advice (orig-fun session-path result-text command-string)
+(defun emigo-visual--agent-finished-advice (orig-fun session-path)
+  "Advice for emigo--agent-finished to display accumulated attempt_completion result."
+  (message "[Emigo Visual DEBUG] *** agent-finished called ***")
+  (message "[Emigo Visual DEBUG] session-path: %s" session-path)
+  ;; Call original function
+  (funcall orig-fun session-path))
+
+(defun emigo-visual--signal-completion-advice (orig-fun session-path result-text)
   "Advice for emigo--signal-completion to style completion text.
 Makes completion text bright white and bold without box decorations."
   (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
@@ -449,23 +482,22 @@ Makes completion text bright white and bold without box decorations."
             (insert "\n")
             (insert (propertize result-text 'face '(:foreground "white" :weight bold)))
             (insert "\n")))))
-    ;; Still call original to handle message and command prompt
-    (message "[Emigo] Task completed by agent for session: %s" session-path)
-    (when (and command-string (not (string-empty-p command-string)))
-      (if (y-or-n-p (format "Run demonstration command? `%s`" command-string))
-          (emigo--execute-command-sync session-path command-string)))))
+    ;; Call original to handle message
+    (message "[Emigo] Task completed by agent for session: %s" session-path)))
 
 ;; Function to apply/reapply advice
 (defun emigo-visual--apply-advice ()
   "Apply visual enhancements advice to emigo functions."
   (advice-add 'emigo--flush-buffer :around #'emigo-visual--flush-buffer-advice)
-  (advice-add 'emigo--signal-completion :around #'emigo-visual--signal-completion-advice))
+  (advice-add 'emigo--signal-completion :around #'emigo-visual--signal-completion-advice)
+  (advice-add 'emigo--agent-finished :around #'emigo-visual--agent-finished-advice))
 
 (defun emigo-visual--remove-advice ()
   "Remove visual enhancements advice from emigo functions."
   (interactive)
   (advice-remove 'emigo--flush-buffer #'emigo-visual--flush-buffer-advice)
   (advice-remove 'emigo--signal-completion #'emigo-visual--signal-completion-advice)
+  (advice-remove 'emigo--agent-finished #'emigo-visual--agent-finished-advice)
   (message "[Emigo Visual] Advice removed"))
 
 ;; Apply advice after emigo is loaded
