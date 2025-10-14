@@ -407,6 +407,70 @@ def ask_followup_question(session: Session, parameters: Dict[str, Any]) -> str:
         print(f"Error asking followup question via Emacs: {e}", file=sys.stderr)
         return _format_tool_error(f"Error asking question: {e}")
 
+def read_image(session: Session, parameters: Dict[str, Any]) -> str:
+    """
+    Read and encode an image file for vision model analysis.
+    
+    Returns a special format that will be handled by the LLM worker to
+    construct a multi-modal message with the image content.
+    """
+    import base64
+    from pathlib import Path
+    
+    path = parameters.get("path")
+    if not path:
+        return _format_tool_error("Missing required parameter: path")
+    
+    # Resolve path relative to session directory
+    full_path = Path(session.session_path) / path
+    
+    # Check if file exists
+    if not full_path.exists():
+        return _format_tool_error(f"Image file not found: {path}")
+    
+    if not full_path.is_file():
+        return _format_tool_error(f"Path is not a file: {path}")
+    
+    # Check file size (20MB limit)
+    file_size = full_path.stat().st_size
+    max_size = 20 * 1024 * 1024  # 20MB
+    if file_size > max_size:
+        return _format_tool_error(f"Image file too large: {file_size / (1024*1024):.1f}MB (max: 20MB)")
+    
+    # Determine mime type from extension
+    ext = full_path.suffix.lower()
+    mime_types = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.bmp': 'image/bmp',
+        '.svg': 'image/svg+xml'
+    }
+    
+    mime_type = mime_types.get(ext)
+    if not mime_type:
+        return _format_tool_error(f"Unsupported image format: {ext}. Supported: jpg, jpeg, png, gif, webp, bmp, svg")
+    
+    try:
+        # Read and encode image
+        with open(full_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode('utf-8')
+        
+        # Return a special format that the LLM worker will recognize
+        # This will be intercepted and converted to a vision message
+        return json.dumps({
+            "_image_content": True,
+            "path": str(path),
+            "mime_type": mime_type,
+            "data": image_data,
+            "size": file_size
+        })
+    
+    except Exception as e:
+        return _format_tool_error(f"Error reading image: {e}")
+
 def attempt_completion(session: Session, parameters: Dict[str, Any]) -> str:
     """Signals completion to Emacs."""
     result_text = parameters.get("result")

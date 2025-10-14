@@ -218,8 +218,8 @@ class Session:
             # If repomap hasn't been generated yet, show recursive directory listing
             details += "# File/Directory Structure (use list_repomap tool for code summary)\n"
             try:
-                # Use RepoMapper's file finding logic for consistency
-                all_files = self.repo_mapper._find_src_files(self.session_path) # Find files respecting ignores
+                # Use RepoMapper's file finding logic (includes images for read_image tool)
+                all_files = self.repo_mapper._find_all_files_including_images(self.session_path)
                 tree_lines = []
                 processed_dirs = set()
                 for abs_file in sorted(all_files):

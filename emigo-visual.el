@@ -347,6 +347,12 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
                       (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
                       (insert "  ")
                       (insert (propertize "Listing directory..." 'face '(:foreground "purple" :weight bold)))
+                      (insert "\n"))
+                    ;; For read_image, show placeholder
+                    (when (string= effective-tool-name "read_image")
+                      (insert (propertize emigo-tool-call-box-char 'face 'emigo-tool-call-border))
+                      (insert "  ")
+                      (insert (propertize "Analyzing image..." 'face '(:foreground "cyan" :weight bold)))
                       (insert "\n")))))))
           nil)
        
@@ -395,7 +401,13 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
           (emigo-visual--display-tool-param 
            session-path effective-tool-name "path" 
            "Listing directory..." "📁 " 
-           '(:foreground "purple" :weight bold))))
+           '(:foreground "purple" :weight bold)))
+         
+         ((string= effective-tool-name "read_image")
+          (emigo-visual--display-tool-param 
+           session-path effective-tool-name "path" 
+           "Analyzing image..." "🖼️ " 
+           '(:foreground "cyan" :weight bold))))
         nil)
        
        ((equal role "tool_json_end")
