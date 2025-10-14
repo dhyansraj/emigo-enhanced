@@ -274,14 +274,6 @@ MODEL-INFO: string like \"gpt-4\""
 (defun emigo-visual--flush-buffer-advice (orig-fun session-path content &optional role tool-id tool-name)
   "Advice for emigo--flush-buffer to add visual enhancements.
 Intercepts tool calls to apply fancy formatting instead of plain text."
-  ;; DEBUG: Log all tool-related calls with actual content
-  (when (member role '("tool_json" "tool_json_args" "tool_json_end"))
-    (message "[Emigo Visual DEBUG] role=%s tool-name=%s tool-id=%s"
-             role
-             (or tool-name "nil")
-             (or tool-id "nil"))
-    (message "[Emigo Visual DEBUG] content: %s" content))
-  
   ;; Save tool-name when we get it (in tool_json), use it for subsequent calls
   (when (and (equal role "tool_json") tool-name)
     (setq emigo--current-tool-name tool-name))
@@ -289,13 +281,16 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
   ;; Use saved tool-name if current one is nil
   (let ((effective-tool-name (or tool-name emigo--current-tool-name)))
     ;; For tool calls, intercept and replace with fancy formatting
-    (if (and (member role '("tool_json" "tool_json_args" "tool_json_end"))
-             (not (string= effective-tool-name "attempt_completion")))
+    ;; ALWAYS intercept attempt_completion to prevent JSON display
+    (if (member role '("tool_json" "tool_json_args" "tool_json_end"))
         ;; Handle tool calls with fancy formatting
         (cond
          ((equal role "tool_json")
           (setq emigo--tool-json-block content)
-          (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
+          ;; Skip display for attempt_completion
+          (if (string= effective-tool-name "attempt_completion")
+              nil
+            (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
             (when buffer
               (with-current-buffer buffer
                 (save-excursion
@@ -348,13 +343,16 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
                       (insert "  ")
                       (insert (propertize "Listing directory..." 'face '(:foreground "purple" :weight bold)))
                       (insert "\n")))))))
-          nil)
+            nil))
        
        ((equal role "tool_json_args")
         (setq emigo--tool-json-block (concat emigo--tool-json-block content))
         
-        ;; Display parameters for different tools using the utility function
-        (cond
+        ;; Skip display for attempt_completion
+        (if (string= effective-tool-name "attempt_completion")
+            nil
+          ;; Display parameters for different tools using the utility function
+          (cond
          ((string= effective-tool-name "execute_command")
           (emigo-visual--display-tool-param 
            session-path effective-tool-name "command" 
@@ -395,25 +393,17 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
           (emigo-visual--display-tool-param 
            session-path effective-tool-name "path" 
            "Listing directory..." "📁 " 
-           '(:foreground "purple" :weight bold))))
+           '(:foreground "purple" :weight bold)))))
         nil)
        
        ((equal role "tool_json_end")
-        ;; DEBUG: Log complete tool call with accumulated JSON parameters
-        (message "[Emigo Visual DEBUG] ========================================")
-        (message "[Emigo Visual DEBUG] Tool call complete: %s" effective-tool-name)
-        (message "[Emigo Visual DEBUG] Full JSON: %s" emigo--tool-json-block)
-        (message "[Emigo Visual DEBUG] ========================================")
-        
         ;; If we have accumulated attempt_completion JSON, parse and display it
         (when (and emigo--current-tool-name
                    (string= emigo--current-tool-name "attempt_completion")
                    (not (string-empty-p emigo--tool-json-block)))
-          (message "[Emigo Visual DEBUG] Processing accumulated attempt_completion JSON")
           (condition-case err
               (let* ((json-data (json-parse-string emigo--tool-json-block :object-type 'alist))
                      (result-from-json (alist-get 'result json-data)))
-                (message "[Emigo Visual DEBUG] Parsed result from JSON: %s" result-from-json)
                 (when result-from-json
                   (let ((buffer (get-buffer (format "*emigo:%s*" session-path))))
                     (when buffer
@@ -423,13 +413,10 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
                           (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
                             (forward-line -2)
                             (goto-char (line-end-position)))
-                          (message "[Emigo Visual DEBUG] Inserting result at position: %d" (point))
                           (insert "\n")
                           (insert (propertize result-from-json 'face '(:foreground "white" :weight bold)))
-                          (insert "\n")
-                          (message "[Emigo Visual DEBUG] Result inserted successfully!")))))))
-            (error
-             (message "[Emigo Visual DEBUG] ERROR parsing attempt_completion: %s" err))))
+                          (insert "\n")))))))
+            (error nil)))
         
         ;; Skip attempt_completion - don't show it
         (unless (string= effective-tool-name "attempt_completion")
@@ -458,8 +445,6 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
 
 (defun emigo-visual--agent-finished-advice (orig-fun session-path)
   "Advice for emigo--agent-finished to display accumulated attempt_completion result."
-  (message "[Emigo Visual DEBUG] *** agent-finished called ***")
-  (message "[Emigo Visual DEBUG] session-path: %s" session-path)
   ;; Call original function
   (funcall orig-fun session-path))
 
