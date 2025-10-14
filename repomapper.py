@@ -48,6 +48,7 @@ from tqdm import tqdm
 from config import ( # Import centralized lists
     IGNORED_DIRS,
     BINARY_EXTS,
+    CODE_ANALYSIS_BINARY_EXTS,
     NORMALIZED_ROOT_IMPORTANT_FILES
 )
 
@@ -946,6 +947,49 @@ class RepoMapper:
         if self.verbose:
             print(f"Found {len(src_files)} potential source files.", file=sys.stderr)
         return src_files
+
+    def _find_all_files_including_images(self, directory):
+        """Finds all files including images (for file listings with read_image support)."""
+        if not os.path.isdir(directory):
+            if os.path.exists(directory):
+                ext = os.path.splitext(directory)[1].lower()
+                if ext in CODE_ANALYSIS_BINARY_EXTS:
+                    return []
+                return [directory]
+            warnings.warn(f"Input path is not a directory or file: {directory}")
+            return []
+
+        all_files = []
+        gitignore = self._parse_gitignore()
+        if self.verbose:
+            print(f"Scanning directory (including images): {directory}", file=sys.stderr)
+        for root, dirs, files in os.walk(directory, topdown=True):
+            # Filter directories
+            dirs[:] = [
+                d for d in dirs
+                if not (
+                    d.startswith('.') or
+                    any(re.match(pattern, d) for pattern in IGNORED_DIRS)
+                )
+            ]
+
+            for file in files:
+                file_path = os.path.join(root, file)
+                ext = os.path.splitext(file)[1].lower()
+
+                # Exclude only non-image binaries
+                if (
+                    ext in CODE_ANALYSIS_BINARY_EXTS or
+                    file.startswith('.') or
+                    (gitignore is not None and gitignore(file_path))
+                ):
+                    continue
+
+                all_files.append(file_path)
+
+        if self.verbose:
+            print(f"Found {len(all_files)} files (including images).", file=sys.stderr)
+        return all_files
 
     def generate_map(self, chat_files=None, mentioned_files=None, mentioned_idents=None, force_refresh=None):
         """Generate repository map with optional context files/identifiers

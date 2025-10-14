@@ -56,6 +56,17 @@ BINARY_EXTS = {
     '.log', '.tmp', '.swp'
 }
 
+# --- Image Extensions (Readable by read_image tool) ---
+# These are technically binary but can be analyzed by vision models
+IMAGE_EXTS = {
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'
+}
+
+# --- Binary Extensions for Code Analysis (excludes images) ---
+# Used for filtering files that should NOT be shown in file listings
+# Images are excluded since they can be read by read_image tool
+CODE_ANALYSIS_BINARY_EXTS = BINARY_EXTS - IMAGE_EXTS
+
 # --- Important Files (Root Level) ---
 # Used in repomapper.py (is_important)
 # List of filenames/paths considered important at the root of a project.

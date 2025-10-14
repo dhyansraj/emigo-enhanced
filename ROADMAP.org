@@ -158,6 +158,31 @@ EmigoE is a fork of emigo with focus on better UX, cleaner interface, and develo
   - list_repomap: 🗺️ path (orange)
   - list_files: 📁 path (purple)
 
+* Priority 13: Vision Support
+** DONE Add image analysis capability
+- [X] Add read_image tool to tool_definitions.py
+- [X] Implement image encoding (base64) in tools.py
+- [X] Support common formats: jpg, jpeg, png, gif, webp, bmp, svg
+- [X] Update message format to support vision content (LLM worker integration)
+- [X] Add visual enhancement for read_image tool (🖼️ icon)
+- [ ] Test with vision-capable models (GPT-4V, Claude 3, Gemini)
+- [X] Add error handling for unsupported formats
+- [X] Add file size limits (20MB max)
+- [X] Fix file filtering to include images in environment details
+
+** TODO Update API integration for vision
+- [ ] Modify LLM API calls to support multi-modal content
+- [ ] Handle both text and image content in messages
+- [ ] Support inline image references in chat
+- [ ] Add configuration for vision model selection
+
+** Use Cases
+- Analyze screenshots and diagrams
+- Read text from images (OCR-like)
+- Understand UI mockups
+- Debug visual issues in applications
+- Analyze charts and graphs
+
 * Completed Features
 - [X] Hot reload function
 - [X] Auto-approve commands

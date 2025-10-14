@@ -116,7 +116,18 @@ class Agent:
         # --- Append Environment Details (Stored in self.environment_details_str) ---
         # Use copy() to avoid modifying the history object directly
         last_message_copy = messages_to_send[-1].copy()
-        last_message_copy["content"] += f"\n\n{self.environment_details_str}" # Append stored details
+        
+        # Check if content is a string or structured (for vision messages)
+        if isinstance(last_message_copy["content"], str):
+            # Simple string content - append directly
+            last_message_copy["content"] += f"\n\n{self.environment_details_str}"
+        elif isinstance(last_message_copy["content"], list):
+            # Structured content (vision message) - add environment as a new text block
+            last_message_copy["content"].append({
+                "type": "text",
+                "text": f"\n\n{self.environment_details_str}"
+            })
+        
         messages_to_send[-1] = last_message_copy # Replace the last message
 
         return messages_to_send

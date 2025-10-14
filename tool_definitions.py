@@ -22,6 +22,7 @@ from tools import (
     search_files,
     list_files,
     list_repomap,
+    read_image,
     attempt_completion
 )
 
@@ -34,6 +35,7 @@ TOOL_REPLACE_IN_FILE = "replace_in_file"
 TOOL_SEARCH_FILES = "search_files"
 TOOL_LIST_FILES = "list_files"
 TOOL_LIST_REPOMAP = "list_repomap"
+TOOL_READ_IMAGE = "read_image"
 TOOL_ATTEMPT_COMPLETION = "attempt_completion"
 
 
@@ -154,6 +156,15 @@ LIST_REPOMAP_TOOL = ToolDefinition(
     function=list_repomap
 )
 
+READ_IMAGE_TOOL = ToolDefinition(
+    name="read_image",
+    description="Read and analyze an image file. Supports common image formats (jpg, jpeg, png, gif, webp). Use this tool to understand the content of screenshots, diagrams, UI mockups, charts, or any visual content. The image will be encoded and sent to the vision model for analysis. Maximum file size: 20MB.",
+    parameters=[
+        ToolParameter(name="path", type="string", description="The relative path to the image file to analyze.", required=True),
+    ],
+    function=read_image
+)
+
 ATTEMPT_COMPLETION_TOOL = ToolDefinition(
     name="attempt_completion",
     description="Use this tool ONLY when you have successfully completed all steps required by the user's request. After using a tool like `replace_in_file` or `write_to_file`, analyze the result: if the change successfully fulfills the user's request, use this tool to present the final result. Do not attempt further refinements unless explicitly asked. If there are commands the user should run to see or use the result (e.g., 'open index.html', 'python app.py', 'npm start'), mention them in your result text. The user may provide feedback if unsatisfied, which you can use to make improvements and try again.",
@@ -174,6 +185,7 @@ TOOL_REGISTRY: Dict[str, ToolDefinition] = {
         SEARCH_FILES_TOOL,
         LIST_FILES_TOOL,
         LIST_REPOMAP_TOOL,
+        READ_IMAGE_TOOL,
         ATTEMPT_COMPLETION_TOOL,
     ]
 }

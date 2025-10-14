@@ -445,14 +445,60 @@ def handle_interaction_request(request):
                     # The LLM should see them and decide how to handle (retry, fix params, etc.)
                     # Only COMPLETION and DENIED signals end the interaction
                     
-                    # --- Filter and prepare result for history ---
-                    filtered_tool_result = _filter_environment_details(tool_result_str)
-                    tool_results_for_history.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "name": tool_name,
-                        "content": filtered_tool_result
-                    })
+                    # --- Check if result is image content for vision models ---
+                    try:
+                        result_data = json.loads(tool_result_str)
+                        if isinstance(result_data, dict) and result_data.get("_image_content"):
+                            # This is image content - convert to vision message format
+                            print(f"Worker: Detected image content from {tool_name}. Converting to vision message.", file=sys.stderr)
+                            
+                            # Add the tool result as normal (for history tracking)
+                            filtered_tool_result = _filter_environment_details(f"Image loaded: {result_data.get('path')}")
+                            tool_results_for_history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "name": tool_name,
+                                "content": filtered_tool_result
+                            })
+                            
+                            # Add a follow-up user message with the image for vision models
+                            # OpenAI vision format
+                            vision_message = {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": f"Please analyze this image ({result_data.get('path')}):"
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:{result_data.get('mime_type')};base64,{result_data.get('data')}"
+                                        }
+                                    }
+                                ]
+                            }
+                            # Add vision message to history immediately after tool result
+                            tool_results_for_history.append(vision_message)
+                            print(f"Worker: Added vision message for image analysis.", file=sys.stderr)
+                        else:
+                            # Normal tool result
+                            filtered_tool_result = _filter_environment_details(tool_result_str)
+                            tool_results_for_history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "name": tool_name,
+                                "content": filtered_tool_result
+                            })
+                    except (json.JSONDecodeError, ValueError):
+                        # Not JSON or not image content - treat as normal text result
+                        filtered_tool_result = _filter_environment_details(tool_result_str)
+                        tool_results_for_history.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "name": tool_name,
+                            "content": filtered_tool_result
+                        })
 
                 # 5. Add Tool Results to History (potentially including signal messages)
                 if tool_results_for_history:

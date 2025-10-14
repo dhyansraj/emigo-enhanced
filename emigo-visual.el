@@ -405,7 +405,7 @@ Intercepts tool calls to apply fancy formatting instead of plain text."
           (emigo-visual--display-tool-param 
            session-path effective-tool-name "path" 
            "Analyzing image..." "🖼️ " 
-           '(:foreground "cyan" :weight bold)))))
+           '(:foreground "cyan" :weight bold))))
         nil)
        
        ((equal role "tool_json_end")
